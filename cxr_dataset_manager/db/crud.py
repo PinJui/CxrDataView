@@ -406,6 +406,39 @@ def list_version_images(
     return {"total": total, "offset": offset, "limit": limit, "items": [dict(r) for r in rows]}
 
 
+def resolve_image(db: Session, token: str) -> Optional[int]:
+    """`123`、`original_set/版本/檔名`、或裸檔名 → image_id。
+
+    純數字當 id；其餘走檔名查詢。檔名只在 image_batch 內唯一，所以裸檔名
+    對到多張時會回 None，要求使用者給完整路徑或 id。
+    """
+    if token.isdigit():
+        found = db.execute(
+            select(m.Image.id).where(m.Image.id == int(token))
+        ).scalar_one_or_none()
+        return found
+
+    matches = list(
+        db.execute(
+            text(
+                """
+                SELECT i.id FROM images i
+                JOIN image_batches ib ON ib.id = i.image_batch_id
+                JOIN original_sets os ON os.id = ib.original_set_id
+                WHERE i.file_name = :fn
+                  AND (CAST(:osname AS text) IS NULL OR os.name = :osname)
+                  AND (CAST(:version AS text) IS NULL OR ib.version = :version)
+                ORDER BY i.id
+                """
+            ),
+            _split_image_ref(token),
+        ).scalars()
+    )
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -> dict[str, Any]:
     head = db.execute(
         text(
@@ -504,8 +537,28 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
         {"iid": image_id},
     ).mappings().all()
 
+    # 這張圖被哪些 manual-set 用了——刪除、查洩漏、追責任時都會想知道
+    used_by = db.execute(
+        text(
+            """
+            SELECT ms.name, mv.version,
+                   (SELECT count(*) FROM manual_set_cls_annotations a
+                     WHERE a.manual_set_version_id = mv.id AND a.image_id = :iid)
+                 + (SELECT count(*) FROM manual_set_det_annotations d
+                     WHERE d.manual_set_version_id = mv.id AND d.image_id = :iid) AS annotations
+            FROM manual_set_images msi
+            JOIN manual_set_versions mv ON mv.id = msi.manual_set_version_id
+            JOIN manual_sets ms ON ms.id = mv.manual_set_id
+            WHERE msi.image_id = :iid
+            ORDER BY ms.name, mv.version
+            """
+        ),
+        {"iid": image_id},
+    ).mappings().all()
+
     return {
         **dict(head),
+        "used_by": [dict(r) for r in used_by],
         "cls_annotations": [dict(r) for r in cls],
         "det_annotations": [
             {**dict(r), "bbox": [float(x) for x in r["bbox"]]} for r in det

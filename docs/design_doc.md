@@ -256,15 +256,14 @@ the Python AST against a node whitelist — a spec is data, never code.
 **Deletion is the one exception to immutability.** `cxr rm` exists because a
 mistaken build otherwise strands a version number forever. It prints what will
 be lost, refuses to run unattended without `--yes`, and tells you to save the
-spec first, since that file is the only thing that can reproduce the dataset.
-Source data is never touched: CASCADE removes the membership rows and the spec,
-while `ON DELETE RESTRICT` on the source tables keeps the originals safe.
+spec first — that file is the only thing that can reproduce the dataset. Source
+data is never touched: CASCADE removes the membership rows and the spec, while
+`ON DELETE RESTRICT` on the source tables keeps the originals safe.
 
-**Version conflicts are resolved optimistically.** The pre-flight check on
-version availability exists only for a friendly message; the real guarantee is
-`UNIQUE (manual_set_id, version)`. When two people commit the same version at
-once, one hits the constraint and the error names who won. No locks, so nothing
-blocks or deadlocks.
+**Version conflicts are resolved optimistically.** The pre-flight check exists
+only for a friendly message; the real guarantee is `UNIQUE (manual_set_id,
+version)`. When two people commit the same version at once, one hits the
+constraint and the error names who won. No locks, so nothing blocks.
 
 **Every version records who built it.** `created_by_name` / `created_by_email`
 are plain columns, not a reference to `annotators` — that table records who
@@ -290,7 +289,7 @@ the error message's job, not the database's.
 `ops.py` cannot make its own verification pass.
 
 ## 8. Testing
-161 tests, against a real PostgreSQL instance rather than SQLite: the deferred
+165 tests, against a real PostgreSQL instance rather than SQLite: the deferred
 constraint triggers, composite foreign keys, `ARRAY` and `JSONB` are all
 PostgreSQL-specific, and SQLite would test constraints that do not exist.
 
@@ -318,7 +317,8 @@ never run. Unit tests covered the query, not the line printing it.
 - `scripts/tools/` holds the migration utilities: parquet import (original-set
   and manual-set), blake3 backfill, and lineage building. They need
   pandas/pyarrow, which the runtime does not.
-- No command displays an image. See `TODO.md`.
+- `cxr image` shows everything recorded about one image — annotations, lineage,
+  duplicates, which datasets use it — but not the film itself. See `TODO.md`.
 - Largest tested scale is ~1,000 images. `Catalog` holds every batch it touches
   in memory. The tool is expected to run on the server beside the database, so
   latency and memory have not been treated as constraints.

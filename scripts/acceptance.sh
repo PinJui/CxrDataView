@@ -102,7 +102,7 @@ for c in "ls sets" "ls batches" "ls categories" "ls annotators" \
          "show pneumonia_train@V1" "spec pneumonia_train@V1" \
          "diff pneumonia_train@V1 pneumonia_val@V1" \
          "check-leakage pneumonia_train@V1 pneumonia_val@V1" \
-         "validate specs/pneumonia_train.yaml"; do
+         "validate specs/pneumonia_train.yaml" "image 1"; do
   out=$($CXR $c 2>&1)
   if [ $? -eq 0 ] && ! printf '%s' "$out" | grep -q "Traceback"; then
     check "cxr $c" "ok" "ok"
@@ -126,6 +126,7 @@ out=$($CXR why pneumonia_train@V1 --image aws_images/V1/AWS_00004.png 2>&1)
 
 step "10. 錯誤路徑要給看得懂的訊息，不能吐 traceback"
 for c in "show no_such@V1" "spec no_such@V1" "export no_such@V1" "rm no_such@V1 --yes" \
+         "image 99999999" \
          "show missing_at_sign" "validate /tmp/nope.yaml"; do
   out=$($CXR $c 2>&1)
   if [ $? -ne 0 ] && ! printf '%s' "$out" | grep -q "Traceback"; then

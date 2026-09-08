@@ -467,6 +467,98 @@ def spec(ref: str = typer.Argument(..., help="manual-set@版本")):
 
 
 @app.command()
+def image(
+    ref: str = typer.Argument(..., help="image_id，或 original_set/版本/檔名"),
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v", help="只看某個 manual-set 版本選了哪些標註"
+    ),
+):
+    """看一張影像：標註、血緣、內容重複、被哪些資料集用了。
+
+    id 從 `cxr explore` 的 images / duplicates / conflicts 輸出取得，
+    也可以直接給 original_set/版本/檔名。
+    """
+    db = new_session()
+    image_id = crud.resolve_image(db, ref)
+    if image_id is None:
+        _die(
+            f"找不到影像 {ref}"
+            + ("（檔名可能對到多張，請給完整路徑或 image_id）" if not ref.isdigit() else "")
+        )
+
+    version_id = _resolve(db, version) if version else None
+    d = crud.image_detail(db, image_id, version_id)
+
+    console.print(
+        Panel(
+            f"[bold]{d['original_set']}/{d['batch_version']}/{d['file_name']}[/]\n"
+            f"{d['width']} × {d['height']}　病患 {d['subject_id'] or '未知'}　"
+            f"拍攝 {d['date_captured'] or '未知'}　授權 {d['license'] or '未知'}\n"
+            f"blake3 {d['blake3_hash'] or '—'}",
+            title=f"[cyan]image #{image_id}[/]",
+        )
+    )
+
+    rows = [
+        [f"#{a['id']}", "cls", a["category"], a["source"], a["annotator"], a["score"]]
+        for a in d["cls_annotations"]
+    ] + [
+        [f"#{a['id']}", "det", a["category"], a["source"], a["annotator"], a["score"]]
+        for a in d["det_annotations"]
+    ]
+    console.print(
+        _table(
+            "標註" + (f"（限 {version}）" if version else ""),
+            ["id", "種類", "類別", "來源", "標註者", "score"],
+            rows,
+        )
+        if rows
+        else _table("標註", ["id"], [])
+    )
+
+    if d["lineage"]:
+        console.print(
+            _table(
+                "血緣",
+                ["方向", "影像", "id"],
+                [
+                    [
+                        "◀ 來自" if l["direction"] == "parent" else "▶ 衍生出",
+                        f"{l['original_set']}/{l['version']}/{l['file_name']}",
+                        f"#{l['id']}",
+                    ]
+                    for l in d["lineage"]
+                ],
+            )
+        )
+
+    if d["duplicates"]:
+        console.print(
+            _table(
+                "內容完全相同的其他影像（blake3 相同）",
+                ["影像", "id"],
+                [
+                    [f"{x['original_set']}/{x['batch_version']}/{x['file_name']}", f"#{x['id']}"]
+                    for x in d["duplicates"]
+                ],
+            )
+        )
+
+    if d["used_by"]:
+        console.print(
+            _table(
+                "被這些資料集用了",
+                ["manual-set", "版本", "選中的標註數"],
+                [[u["name"], u["version"], u["annotations"]] for u in d["used_by"]],
+            )
+        )
+        console.print(
+            f"  [dim]cxr why <manual-set@版本> --image "
+            f"{d['original_set']}/{d['batch_version']}/{d['file_name']} 看它是怎麼進去的[/]"
+        )
+
+
+@app.command()
 def why(
     ref: str = typer.Argument(..., help="manual-set@版本"),
     image: str = typer.Option(..., "--image", "-i", help="檔名，或 original_set/版本/檔名"),

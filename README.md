@@ -11,7 +11,8 @@ Afterwards, nobody can usually answer these:
 
 | Question | Answer |
 |---|---|
-| Why is this image in the set? | `cxr why name@V1 --image aws_images/V1/AWS_00344.png` |
+| Why is this image in the set? | `cxr why name@V1 --image aws_images/V1/AWS_00344.png
+cxr image 315                     # annotations, lineage, duplicates, users` |
 | Do train and val share a patient? | `cxr check-leakage train@V1 val@V1` |
 | Can I rebuild this in three months? | Yes — the spec is stored; splits use seeded hashing |
 | What changed between versions? | `cxr diff name@V1 name@V2` |
@@ -66,18 +67,17 @@ cxr ls batches                    # how to name sources in a spec
 cxr ls categories                 # local category namespaces per batch
 cxr ls manual-sets                # existing datasets and versions
 cxr ls history                    # every version and the spec that made it
-
 cxr validate spec.yaml            # syntax only, no database access
 cxr build spec.yaml -m name -v V1 [--dry-run]   # --dry-run writes nothing
 
 cxr show name@V1                  # composition, sources, category mapping
-cxr spec name@V1                  # the spec that produced it (save before rm!)
+cxr spec name@V1                  # the spec that made it (save before rm!)
 cxr why name@V1 --image aws_images/V1/AWS_00344.png
+cxr image 315                     # annotations, lineage, duplicates, users
 cxr diff name@V1 name@V2
 cxr check-leakage train@V1 val@V1
 cxr export name@V1 -f zip -o ./out   # COCO json + manifest csv + spec
 cxr rm name@V1                       # delete a version
-
 cxr lists add picks.txt              # register a long file-name list
 ```
 

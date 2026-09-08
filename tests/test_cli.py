@@ -241,3 +241,63 @@ def test_rm_deletes_and_warns_about_the_spec(built, db):
 
 def test_rm_on_a_missing_target_fails_cleanly(built):
     assert "找不到" in fails("rm", "no_such_set@V1", "--yes")
+
+
+def test_image_shows_annotations_lineage_and_duplicates(db):
+    """`cxr image` 是唯一能查影像血緣的入口——build_lineage.py 建的邊，
+    在這支指令出現之前沒有任何介面讀得到。"""
+    from sqlalchemy import text
+
+    edge = db.execute(
+        text("SELECT parent_image_id, child_image_id FROM image_lineage LIMIT 1")
+    ).one_or_none()
+    if edge is None:
+        pytest.skip("這份資料沒有血緣邊，先跑 scripts/tools/build_lineage.py")
+    parent, child = edge
+
+    out = ok("image", str(parent))
+    assert "血緣" in out and "衍生出" in out
+
+    # 反向也查得到
+    assert "來自" in ok("image", str(child))
+
+
+def test_image_accepts_an_id_or_a_path(db):
+    from sqlalchemy import text
+
+    image_id, ref = db.execute(
+        text(
+            """
+            SELECT i.id, os.name || '/' || ib.version || '/' || i.file_name
+            FROM images i
+            JOIN image_batches ib ON ib.id = i.image_batch_id
+            JOIN original_sets os ON os.id = ib.original_set_id
+            LIMIT 1
+            """
+        )
+    ).one()
+    assert f"image #{image_id}" in ok("image", str(image_id))
+    assert f"image #{image_id}" in ok("image", ref)
+
+
+def test_image_reports_which_datasets_use_it(built, db):
+    from sqlalchemy import text
+
+    image_id = db.execute(
+        text(
+            """
+            SELECT msi.image_id FROM manual_set_images msi
+            JOIN manual_set_versions mv ON mv.id = msi.manual_set_version_id
+            JOIN manual_sets ms ON ms.id = mv.manual_set_id
+            WHERE ms.name = :n LIMIT 1
+            """
+        ),
+        {"n": built["name"]},
+    ).scalar_one()
+    out = ok("image", str(image_id))
+    assert "被這些資料集用了" in out and built["name"] in out
+
+
+def test_image_on_a_missing_or_ambiguous_target_fails_cleanly():
+    assert "找不到影像" in fails("image", "99999999")
+    assert "找不到影像" in fails("image", "no_such_file.png")
