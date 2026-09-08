@@ -6,6 +6,8 @@ import pytest
 from sqlalchemy import text
 
 from cxr_dataset_manager.core.engine import Author, execute_spec
+from cxr_dataset_manager.core.schema import BuildSpec
+from cxr_dataset_manager.db import crud
 from cxr_dataset_manager.core.types import Catalog, SpecError
 from cxr_dataset_manager.session.builder import ManualSetSession
 
@@ -126,23 +128,16 @@ def test_commit_leaves_no_trace_of_the_exploration(db, session):
             version="V1", author=Author(name="pytest", email="pytest@example.com")
         )
         assert result.manual_set_version_id is not None
-        assert result.build_spec_id is not None
+        assert result.spec_key is not None
 
-        stored = db.execute(
-            text("SELECT spec FROM manual_set_build_specs WHERE id = :s"),
-            {"s": result.build_spec_id},
-        ).scalar_one()
-        seeds = [step.get("seed") for step in stored["steps"] if step.get("seed")]
+        stored = BuildSpec.from_yaml(
+            crud.version_summary(db, result.manual_set_version_id)["spec_yaml"]
+        )
+        seeds = [getattr(step, "seed", None) for step in stored.steps]
         assert "abandoned" not in seeds
 
-        # 一個版本一份 spec，沒有「跑過幾次」這種東西
-        assert db.execute(
-            text(
-                "SELECT count(*) FROM manual_set_build_specs "
-                "WHERE manual_set_version_id = :v"
-            ),
-            {"v": result.manual_set_version_id},
-        ).scalar_one() == 1
+        # 一個版本一份 spec，位置是算出來的，不會有第二份
+        assert result.spec_key == f"{session.name}/annotations/V1/spec.yaml"
     finally:
         db.execute(text("DELETE FROM manual_sets WHERE name = :n"), {"n": session.name})
         db.commit()

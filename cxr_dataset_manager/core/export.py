@@ -186,18 +186,20 @@ def to_zip(db: Session, version_id: int, include_spec: bool = True) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("annotations_coco.json", json.dumps(to_coco(db, version_id), indent=2, default=str))
         z.writestr("manifest.csv", to_manifest_csv(db, version_id))
-        if include_spec and summary["spec"]:
-            z.writestr("build_spec.json", json.dumps(summary["spec"], indent=2, ensure_ascii=False))
+        if include_spec and summary["spec_yaml"]:
+            # 逐位元組照抄物件儲存上的那份，不重新序列化——匯出包裡的 spec
+            # 必須跟 spec_sha256 對得起來，否則這個檔案沒有意義。
+            z.writestr("build_spec.yaml", summary["spec_yaml"])
         z.writestr(
             "README.txt",
             f"""{summary['manual_set']}@{summary['version']}
 建立時間: {summary['created_at']}
-spec sha256: {summary['spec_sha256']}
+spec sha256: {summary['spec_sha256'] or '—（匯入的版本，沒有 spec）'}
 影像: {summary['images']}  cls 標註: {summary['cls']}  det 標註: {summary['det']}
 
 annotations_coco.json  COCO 格式，class name 用的是這個版本自己的 target category
 manifest.csv           一張圖一列，含 subject_id，供 patient-level split 使用
-build_spec.json        產生這份資料的 spec，重跑它可以完整重現本結果
+build_spec.yaml        產生這份資料的 spec，重跑它可以完整重現本結果
 
 影像本體不在這個包裡，請用 manifest.csv 的 object_key 去 original-sets bucket 取。
 """,

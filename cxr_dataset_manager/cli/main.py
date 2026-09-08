@@ -39,10 +39,42 @@ app.add_typer(ls_app, name="ls")
 app.add_typer(lists_app, name="lists")
 
 console = Console()
+# 錯誤與警告一律走 stderr：`cxr spec x@V1 > x.yaml` 的 stdout 是資料，
+# 把訊息混進去就等於產出一份壞掉的 YAML。
+err_console = Console(stderr=True)
+
+
+def _emit(text_body: str, lexer: str) -> None:
+    """把一份要被原樣保存的文字送到 stdout。
+
+    不能直接 console.print(Syntax(...))：Rich 的 Syntax 預設 word_wrap=False，
+    超出主控台寬度的部分是「裁掉」而不是折行，而重導向到檔案時沒有 tty，
+    寬度就當成 80，CJK 每字還佔兩格。`cxr spec x@V1 > x.yaml` 於是會安靜地
+    產出一份少了字的 YAML——在自己的寬終端上完全看不出來。
+
+    所以只有真的在終端機裡才上色；一旦被導向檔案或管線就原文輸出。
+    """
+    if sys.stdout.isatty():
+        console.print(Syntax(text_body, lexer, theme="ansi_dark"))
+    else:
+        sys.stdout.write(text_body if text_body.endswith("\n") else text_body + "\n")
+
+
+def _spec_line(summary: dict) -> str:
+    """`cxr show` 面板裡描述 spec 位置與健康狀態的那一行。"""
+    status = summary["spec_status"]
+    if status == "none":
+        return "—（匯入的版本，沒有 spec）"
+    where = f"[dim]{summary['spec_key']}[/]"
+    if status == "ok":
+        return f"{where}  sha256 {summary['spec_sha256'][:16]}…"
+    if status == "missing":
+        return f"{where}  [red]檔案不見了[/]"
+    return f"{where}  [yellow]內容與指紋不符[/]"
 
 
 def _die(message: str) -> None:
-    console.print(f"[bold red]✗[/] {message}")
+    err_console.print(f"[bold red]✗[/] {message}")
     raise typer.Exit(1)
 
 
@@ -253,11 +285,12 @@ def ls_history(limit: int = 20):
     console.print(
         _table(
             "建構歷史",
-            ["manual-set", "版本", "影像", "步驟", "建立者", "建立時間"],
+            ["manual-set", "版本", "影像", "spec", "建立者", "建立時間"],
             [
                 [
-                    r["manual_set"], r["version"], r["images"], r["steps"],
-                    r["created_by_name"], str(r["created_at"])[:19],
+                    r["manual_set"], r["version"], r["images"],
+                    (r["spec_sha256"] or "—")[:12], r["created_by_name"],
+                    str(r["created_at"])[:19],
                 ]
                 for r in rows
             ],
@@ -434,8 +467,8 @@ def show(ref: str = typer.Argument(..., help="manual-set@版本，例如 pneumon
             f"det [bold]{summary['det']}[/]\n"
             f"病患數 {summary['subjects']['distinct']}"
             f"（{summary['subjects']['images_without_subject']} 張無病患資訊）\n"
-            f"建立者 {summary.get('created_by') or '—'}\n"
-            f"spec sha256 {(summary['spec_sha256'] or '—')[:16]}…",
+            f"建立者 {summary['created_by']}\n"
+            f"spec {_spec_line(summary)}",
             title=f"[cyan]{ref}[/]",
         )
     )
@@ -456,14 +489,19 @@ def show(ref: str = typer.Argument(..., help="manual-set@版本，例如 pneumon
 
 @app.command()
 def spec(ref: str = typer.Argument(..., help="manual-set@版本")):
-    """把產生某個版本的 spec 印出來（可直接存檔重跑）。"""
+    """把產生某個版本的 spec 印出來（可直接存檔重跑）。
+
+    `cxr spec x@V1 > x.yaml` 是官方的保存方式，所以重導向時一個位元組都不能
+    變：沒有 tty 就走 stdout 原文，有 tty 才交給 Rich 上色。
+    """
     db = new_session()
     version_id = _resolve(db, ref)
-    summary = crud.version_summary(db, version_id)
-    if not summary["spec"]:
-        _die(f"{ref} 沒有對應的 spec")
-    parsed = BuildSpec.model_validate(summary["spec"])
-    console.print(Syntax(parsed.to_yaml(), "yaml", theme="ansi_dark"))
+    loaded = crud.load_spec(db, version_id)
+    if loaded["yaml"] is None:
+        _die(f"{ref}：{crud._spec_unavailable(loaded)}")
+    if loaded["status"] == "modified":
+        err_console.print(f"[yellow]⚠[/] {crud._spec_unavailable(loaded)}")
+    _emit(loaded["yaml"], "yaml")
 
 
 @app.command()
@@ -688,7 +726,7 @@ def rm(
     清掉實驗留下的東西之類。原始的影像與標註完全不受影響，manual-set
     從來就只是「選了哪些」的記錄。
 
-    產生它的 spec 會一起消失，刪掉之後就再也重現不出這份資料集了。
+    物件儲存上那份 spec.yaml 也會一起刪掉，刪完就再也重現不出這份資料集了。
     """
     db = new_session()
     manual_set, _, version = ref.partition("@")
@@ -699,20 +737,21 @@ def rm(
     console.print(
         _table(
             f"即將刪除 [bold]{manual_set}[/]",
-            ["版本", "影像", "cls", "det", "target", "溯源步驟", "建立者", "建立時間"],
+            ["版本", "影像", "cls", "det", "target", "步驟", "建立者", "建立時間"],
             [
                 [
                     v["version"], v["images"], v["cls"], v["det"], v["targets"],
-                    v["steps"], v["created_by"] or "—", str(v["created_at"])[:19],
+                    v["steps"] if v["steps"] is not None else "—",
+                    v["created_by"], str(v["created_at"])[:19],
                 ]
                 for v in plan["versions"]
             ],
         )
     )
-    with_spec = [v for v in plan["versions"] if v["spec_sha256"]]
+    with_spec = [v for v in plan["versions"] if v["spec_key"]]
     if with_spec:
         console.print(
-            f"  [yellow]⚠[/] {len(with_spec)} 份 spec 會一起消失——"
+            f"  [yellow]⚠[/] {len(with_spec)} 份 spec.yaml 會從物件儲存一併刪除——"
             "刪掉之後就再也重現不出這些資料集了。要留存請先執行："
         )
         for v in with_spec:
@@ -730,7 +769,15 @@ def rm(
             console.print("  [dim]已取消[/]")
             raise typer.Abort()
 
+    from cxr_dataset_manager.storage import get_store
+
+    # 先刪資料庫。物件先刪的話，資料庫失敗會留下一個指得到卻讀不到 spec 的版本。
     crud.delete_manual_set(db, manual_set, version or None)
+    for v in with_spec:
+        try:
+            get_store().delete_spec(manual_set, v["version"])
+        except Exception as exc:  # 物件刪不掉不該讓已完成的刪除看起來失敗
+            console.print(f"  [yellow]⚠[/] {v['spec_key']} 沒刪成功（{exc}），請手動清掉")
     console.print(
         f"[green]✓[/] 已刪除 {len(plan['versions'])} 個版本"
         + ("（連同 manual-set 本身）" if plan["removes_manual_set"] else "")

@@ -91,7 +91,8 @@ def _resolve_annotation(db, model, image_id: int, category_id: int, annotator_id
 
 
 def import_manual_set(
-    root: Path, manual_set: str, version: str, dry_run: bool = False
+    root: Path, manual_set: str, version: str, dry_run: bool = False,
+    *, importer_name: str, importer_email: str,
 ) -> None:
     ann_dir = root / "manual-sets" / manual_set / "annotations" / version
     if not ann_dir.is_dir():
@@ -156,7 +157,11 @@ def import_manual_set(
                 f"{manual_set}@{version} 已經存在。版本是不可變的記錄，"
                 "請換一個版本號，不要覆蓋既有版本。"
             )
-        msv = m.ManualSetVersion(manual_set_id=ms.id, version=version)
+        # spec_sha256 留白：這份資料是從 parquet 匯進來的，沒有 spec 可以重現它。
+        msv = m.ManualSetVersion(
+            manual_set_id=ms.id, version=version,
+            created_by_name=importer_name, created_by_email=importer_email,
+        )
         db.add(msv)
         db.flush()
 
@@ -290,8 +295,13 @@ def main() -> None:
     parser.add_argument("--manual-set", required=True, help="manual-set 名稱")
     parser.add_argument("--version", required=True, help="annotations/{版本}")
     parser.add_argument("--dry-run", action="store_true", help="只檢查，不寫入")
+    parser.add_argument("--importer-name", required=True, help="是誰匯入的")
+    parser.add_argument("--importer-email", required=True, help="匯入者 email")
     args = parser.parse_args()
-    import_manual_set(args.root, args.manual_set, args.version, args.dry_run)
+    import_manual_set(
+        args.root, args.manual_set, args.version, args.dry_run,
+        importer_name=args.importer_name, importer_email=args.importer_email,
+    )
 
 
 if __name__ == "__main__":

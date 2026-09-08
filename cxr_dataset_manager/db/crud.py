@@ -11,8 +11,13 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from cxr_dataset_manager.core.schema import BuildSpec
 from cxr_dataset_manager.core.types import SpecError
 from cxr_dataset_manager.db import models as m
+# spec 本體不在資料庫，讀某個版本的 spec 一定要碰物件儲存。storage 跟
+# settings 一樣是最外層的葉子模組（不 import 任何 cxr 模組），所以這條
+# 相依方向跟 db → settings 一致，沒有繞回來。
+from cxr_dataset_manager.storage import get_store, spec_key
 
 
 # ---------------------------------------------------------------------------
@@ -219,11 +224,56 @@ def list_import_lists(db: Session, limit: int = 50) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def load_spec(db: Session, version_id: int) -> dict[str, Any]:
+    """把某個版本的 spec 從物件儲存讀回來，順便驗指紋。
+
+    spec 本體是 manual-sets/{name}/annotations/{version}/spec.yaml，位置由
+    (名稱, 版本) 算出來，不存在資料庫裡。資料庫只留 sha256，於是這裡能分辨
+    四種狀態——這正是留著那個欄位的理由：
+
+      none      這版本是匯入的，本來就沒有 spec
+      ok        檔案在，而且跟當初建構時逐位元組相同
+      missing   資料庫說有，物件儲存找不到（被刪了，或 bucket 不對）
+      modified  檔案在，但內容跟指紋對不起來（被人改過）
+    """
+    row = db.execute(
+        text(
+            """
+            SELECT ms.name AS manual_set, mv.version, mv.spec_sha256
+            FROM manual_set_versions mv JOIN manual_sets ms ON ms.id = mv.manual_set_id
+            WHERE mv.id = :vid
+            """
+        ),
+        {"vid": version_id},
+    ).mappings().one()
+
+    key = spec_key(row["manual_set"], row["version"])
+    if row["spec_sha256"] is None:
+        return {"status": "none", "yaml": None, "key": key, "sha256": None, "expected": None}
+
+    yaml_text = get_store().get_spec(row["manual_set"], row["version"])
+    if yaml_text is None:
+        return {
+            "status": "missing", "yaml": None, "key": key,
+            "sha256": None, "expected": row["spec_sha256"],
+        }
+
+    actual = BuildSpec.from_yaml(yaml_text).sha256()
+    return {
+        "status": "ok" if actual == row["spec_sha256"] else "modified",
+        "yaml": yaml_text,
+        "key": key,
+        "sha256": actual,
+        "expected": row["spec_sha256"],
+    }
+
+
 def version_summary(db: Session, version_id: int) -> dict[str, Any]:
     head = db.execute(
         text(
             """
-            SELECT ms.name AS manual_set, mv.version, mv.created_at, mv.id AS version_id
+            SELECT ms.name AS manual_set, mv.version, mv.created_at, mv.id AS version_id,
+                   mv.created_by_name, mv.created_by_email, mv.spec_sha256
             FROM manual_set_versions mv JOIN manual_sets ms ON ms.id = mv.manual_set_id
             WHERE mv.id = :vid
             """
@@ -310,9 +360,7 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
     for row in mappings:
         grouped_mappings.setdefault(row["target"], []).append(row["local"])
 
-    spec_row = db.execute(
-        select(m.ManualSetBuildSpec).where(m.ManualSetBuildSpec.manual_set_version_id == version_id)
-    ).scalar_one_or_none()
+    spec = load_spec(db, version_id)
 
     return {
         **dict(head),
@@ -321,12 +369,10 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
         "by_target_category": {r["target"]: r["n"] for r in by_target},
         "subjects": dict(subjects),
         "category_mappings": grouped_mappings,
-        "created_by": (
-            f"{spec_row.created_by_name} <{spec_row.created_by_email}>" if spec_row else None
-        ),
-        "spec_sha256": spec_row.spec_sha256 if spec_row else None,
-        "spec": spec_row.spec if spec_row else None,
-        "build_spec_id": spec_row.id if spec_row else None,
+        "created_by": f"{head['created_by_name']} <{head['created_by_email']}>",
+        "spec_yaml": spec["yaml"],
+        "spec_key": spec["key"],
+        "spec_status": spec["status"],
     }
 
 
@@ -601,29 +647,23 @@ def describe_deletion(
                   (SELECT count(*) FROM manual_set_images WHERE manual_set_version_id = :v) AS images,
                   (SELECT count(*) FROM manual_set_cls_annotations WHERE manual_set_version_id = :v) AS cls,
                   (SELECT count(*) FROM manual_set_det_annotations WHERE manual_set_version_id = :v) AS det,
-                  (SELECT count(*) FROM manual_set_target_categories WHERE manual_set_version_id = :v) AS targets,
-                  (SELECT jsonb_array_length(bs.spec -> 'steps')
-                     FROM manual_set_build_specs bs
-                    WHERE bs.manual_set_version_id = :v) AS steps
+                  (SELECT count(*) FROM manual_set_target_categories WHERE manual_set_version_id = :v) AS targets
                 """
             ),
             {"v": v.id},
         ).mappings().one()
-        spec_row = db.execute(
-            select(m.ManualSetBuildSpec).filter_by(manual_set_version_id=v.id)
-        ).scalar_one_or_none()
+        spec = load_spec(db, v.id)
         detail.append(
             {
                 "version_id": v.id,
                 "version": v.version,
                 "created_at": v.created_at,
                 **dict(counts),
-                "spec_sha256": spec_row.spec_sha256 if spec_row else None,
-                "created_by": (
-                    f"{spec_row.created_by_name} <{spec_row.created_by_email}>"
-                    if spec_row
-                    else None
-                ),
+                "steps": len(BuildSpec.from_yaml(spec["yaml"]).steps) if spec["yaml"] else None,
+                "spec_sha256": v.spec_sha256,
+                "spec_key": spec["key"] if spec["status"] != "none" else None,
+                "spec_status": spec["status"],
+                "created_by": f"{v.created_by_name} <{v.created_by_email}>",
             }
         )
 
@@ -709,15 +749,11 @@ def explain(
     if image_id is None:
         return {"found": False, "reason": "找不到這張影像"}
 
-    spec_row = db.execute(
-        select(m.ManualSetBuildSpec).where(
-            m.ManualSetBuildSpec.manual_set_version_id == version_id
-        )
-    ).scalar_one_or_none()
-    if spec_row is None:
-        return {"found": False, "reason": "這個版本沒有對應的 spec（可能是手動建立的）"}
+    spec = load_spec(db, version_id)
+    if spec["yaml"] is None:
+        return {"found": False, "reason": _spec_unavailable(spec)}
 
-    execution = execute_spec(db, BuildSpec.model_validate(spec_row.spec))
+    execution = execute_spec(db, BuildSpec.from_yaml(spec["yaml"]))
 
     # cls 與 det 的 id 是各自獨立的序列，會撞號，所以一定要連 kind 一起配對
     tracked: list[tuple[str, int]] = [("image", image_id)]
@@ -814,10 +850,24 @@ def explain(
     return {
         "found": True,
         "image_id": image_id,
-        "build_spec_id": spec_row.id,
+        "spec_key": spec["key"],
+        "spec_status": spec["status"],
         "in_final_set": bool(in_final),
         "trail": trail,
     }
+
+
+def _spec_unavailable(spec: dict[str, Any]) -> str:
+    """把 load_spec 的狀態翻成一句能照著處理的話。"""
+    if spec["status"] == "none":
+        return "這個版本沒有 spec（是用 scripts/tools/ 匯入的，不是 build 出來的）"
+    if spec["status"] == "missing":
+        return f"物件儲存上找不到 {spec['key']}——spec 被刪掉了，這個版本已經重現不出來"
+    return (
+        f"{spec['key']} 的內容跟建構當時對不起來"
+        f"（現在 {spec['sha256'][:16]}…，當初 {spec['expected'][:16]}…）——"
+        "有人改過這份 spec，重跑它不保證得到同一個版本"
+    )
 
 
 def _split_image_ref(ref: str) -> dict[str, Any]:
@@ -829,24 +879,25 @@ def _split_image_ref(ref: str) -> dict[str, Any]:
 
 
 def build_history(db: Session, limit: int = 30) -> list[dict[str, Any]]:
-    """每一個 manual-set 版本 + 產生它的 spec。
+    """每一個 manual-set 版本 + 產生它的 spec 的指紋。
 
     這就是全部的建構歷史了——探索過程不落庫，一個版本一份 spec，
     沒有「同一份 spec 跑過幾次」這種東西可查。
+
+    這裡不顯示步驟數：spec 本體在物件儲存，數步驟等於一個版本抓一次檔案，
+    列表沒必要付這個代價。要看步驟就 `cxr show` 或 `cxr spec` 單看一個版本。
     """
     rows = db.execute(
         text(
             """
-            SELECT bs.id AS build_spec_id, bs.spec_sha256, bs.created_at,
-                   bs.created_by_name, bs.created_by_email,
-                   ms.name AS manual_set, mv.version, mv.id AS version_id,
-                   jsonb_array_length(bs.spec -> 'steps') AS steps,
+            SELECT mv.id AS version_id, mv.version, mv.created_at, mv.spec_sha256,
+                   mv.created_by_name, mv.created_by_email,
+                   ms.name AS manual_set,
                    (SELECT count(*) FROM manual_set_images x
                      WHERE x.manual_set_version_id = mv.id) AS images
-            FROM manual_set_build_specs bs
-            JOIN manual_set_versions mv ON mv.id = bs.manual_set_version_id
+            FROM manual_set_versions mv
             JOIN manual_sets ms ON ms.id = mv.manual_set_id
-            ORDER BY bs.id DESC LIMIT :limit
+            ORDER BY mv.id DESC LIMIT :limit
             """
         ),
         {"limit": limit},

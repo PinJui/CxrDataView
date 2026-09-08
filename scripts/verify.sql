@@ -85,15 +85,22 @@ checks(seq, 檢查項目, 問題數) AS (
     WHERE table_schema = 'public'
       AND (table_name LIKE '%build_run%' OR table_name LIKE '%build_session%'))
 
-  -- 一個版本剛好一份 spec
-  UNION ALL SELECT 9, '版本數與 spec 數不符', (
-    SELECT abs((SELECT count(*) FROM manual_set_versions)
-             - (SELECT count(*) FROM manual_set_build_specs)))
+  -- spec 指紋要嘛是完整的 sha256，要嘛是 NULL（匯入的版本）
+  UNION ALL SELECT 9, '格式不對的 spec 指紋', (
+    SELECT count(*) FROM manual_set_versions
+    WHERE spec_sha256 IS NOT NULL AND spec_sha256 !~ '^[0-9a-f]{64}$')
 
-  -- 每份 spec 都要有步驟（空的 spec 產不出東西）
-  UNION ALL SELECT 10, '沒有步驟的 spec', (
-    SELECT count(*) FROM manual_set_build_specs
-    WHERE coalesce(jsonb_array_length(spec -> 'steps'), 0) = 0)
+  -- 同一份配方本來就可以做出多個版本（例如重跑驗證），但兩個版本共用一份
+  -- 指紋卻連影像數都不同，那是資料出了問題
+  UNION ALL SELECT 10, '同指紋但內容不同的版本', (
+    SELECT count(*) FROM (
+      SELECT spec_sha256 FROM manual_set_versions mv
+      WHERE spec_sha256 IS NOT NULL
+      GROUP BY spec_sha256
+      HAVING count(DISTINCT (
+        SELECT count(*) FROM manual_set_images x
+        WHERE x.manual_set_version_id = mv.id)) > 1
+    ) t)
 
   -- manual-set 是 training-ready 的：不能有沒標註的影像
   UNION ALL SELECT 11, 'manual-set 裡沒標註的影像', (
@@ -109,14 +116,15 @@ checks(seq, 檢查項目, 問題數) AS (
 
   -- 每個版本都該查得到是誰建的
   UNION ALL SELECT 12, '沒有建立者的版本', (
-    SELECT count(*) FROM manual_set_build_specs
+    SELECT count(*) FROM manual_set_versions
     WHERE created_by_name = '' OR created_by_email NOT LIKE '%@%')
 
-  -- 溯源只剩 spec 一張表：decisions 與 steps 都改成重跑 spec 得出
+  -- 溯源不再有任何獨立的表：spec 本體在物件儲存，逐步紀錄靠重跑 spec 得出
   UNION ALL SELECT 13, '不該存在的溯源表', (
     SELECT count(*) FROM information_schema.tables
     WHERE table_schema = 'public'
-      AND table_name IN ('manual_set_build_decisions', 'manual_set_build_steps'))
+      AND table_name IN ('manual_set_build_decisions', 'manual_set_build_steps',
+                         'manual_set_build_specs'))
 )
 SELECT 檢查項目, 問題數,
        CASE WHEN 問題數 = 0 THEN 'ok' ELSE '<<< 有問題' END AS 結果

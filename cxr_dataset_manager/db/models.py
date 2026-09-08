@@ -266,6 +266,14 @@ class ManualSetVersion(Base):
         BigInteger, ForeignKey("manual_sets.id", ondelete="CASCADE"), nullable=False
     )
     version: Mapped[str] = mapped_column(Text, nullable=False)
+    # 刻意不指向 annotators：那張表記的是「誰標註的」，跟「誰建了這份資料集」
+    # 是兩回事，混在一起會污染標註者統計
+    created_by_name: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_email: Mapped[str] = mapped_column(Text, nullable=False)
+    # spec 本體在物件儲存（manual-sets/{name}/annotations/{version}/spec.yaml），
+    # 這裡只留指紋——用來判斷兩個版本是不是同一份配方，以及偵測 spec.yaml
+    # 事後被改過或不見了。NULL 表示這版本是匯入的，本來就沒有 spec。
+    spec_sha256: Mapped[Optional[str]] = mapped_column(CHAR(64))
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -410,34 +418,6 @@ class ManualSetImportList(Base):
     sha256: Mapped[str] = mapped_column(CHAR(64), primary_key=True)
     file_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     source_note: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
-class ManualSetBuildSpec(Base):
-    """design_doc §5 spec 原文（JSONB），一個 manual_set_version 一份。
-
-    spec 與版本是 1:1：版本不可變，要改就開新版本，所以不存在
-    「同一份 spec 被跑了很多次」的情況，溯源直接掛在 spec 底下。
-    """
-
-    __tablename__ = "manual_set_build_specs"
-    __table_args__ = (Index("idx_build_specs_sha", "spec_sha256"),)
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    manual_set_version_id: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("manual_set_versions.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
-    )
-    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    spec_sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    # 刻意不指向 annotators：那張表記的是「誰標註的」，跟「誰建了這份資料集」
-    # 是兩回事，混在一起會污染標註者統計
-    created_by_name: Mapped[str] = mapped_column(Text, nullable=False)
-    created_by_email: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

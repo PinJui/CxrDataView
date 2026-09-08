@@ -3,6 +3,9 @@
 物件路徑沿用既有慣例：
     original-sets bucket:  {original_set}/images/{version}/{file_name}
     manual-sets   bucket:  {manual_set}/annotations/{version}/{file_name}
+
+產生某個版本的 spec 就放在後者底下，檔名固定 spec.yaml。它是一份文件——
+會被人讀、被人改、被 git 管——所以本體留在物件儲存，資料庫只留 sha256。
 """
 
 from __future__ import annotations
@@ -27,6 +30,14 @@ def object_key_for_image(original_set_name: str, version: str, file_name: str) -
 
 def object_key_for_manual_set_file(manual_set_name: str, version: str, file_name: str) -> str:
     return f"{manual_set_name}/annotations/{version}/{file_name}"
+
+
+SPEC_FILE_NAME = "spec.yaml"
+
+
+def spec_key(manual_set_name: str, version: str) -> str:
+    """產生某個版本的 spec 的物件路徑。位置是算出來的，不需要存在資料庫裡。"""
+    return object_key_for_manual_set_file(manual_set_name, version, SPEC_FILE_NAME)
 
 
 class ObjectStore:
@@ -59,6 +70,23 @@ class ObjectStore:
             return self.client.get_object(Bucket=bucket, Key=key)["Body"].read()
         except ClientError:
             return None
+
+    def delete(self, key: str, bucket: str = ORIGINAL_SET_BUCKET) -> None:
+        self.client.delete_object(Bucket=bucket, Key=key)
+
+    # -- spec ------------------------------------------------------------
+
+    def put_spec(self, manual_set_name: str, version: str, yaml_text: str) -> str:
+        key = spec_key(manual_set_name, version)
+        self.put(key, yaml_text.encode(), "application/yaml", bucket=MANUAL_SET_BUCKET)
+        return key
+
+    def get_spec(self, manual_set_name: str, version: str) -> Optional[str]:
+        raw = self.get(spec_key(manual_set_name, version), bucket=MANUAL_SET_BUCKET)
+        return raw.decode() if raw is not None else None
+
+    def delete_spec(self, manual_set_name: str, version: str) -> None:
+        self.delete(spec_key(manual_set_name, version), bucket=MANUAL_SET_BUCKET)
 
     def presigned_url(self, key: str, bucket: str = ORIGINAL_SET_BUCKET) -> str:
         return self.client.generate_presigned_url(

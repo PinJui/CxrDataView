@@ -221,10 +221,10 @@ def test_a_long_list_survives_the_full_round_trip(db, real_names):
         result = build(db, session.compile(), name, "V1", author=TEST_AUTHOR)
         assert set(result.execution.final.images) == expected
 
-        stored = crud.version_summary(db, result.manual_set_version_id)["spec"]
-        # 存進資料庫的 spec 不該內嵌上萬個檔名
-        assert "GHOST_00001.png" not in str(stored)
-        replayed = execute_spec(db, BuildSpec.model_validate(stored), Catalog(db)).final
+        stored = crud.version_summary(db, result.manual_set_version_id)["spec_yaml"]
+        # 存起來的 spec 不該內嵌上萬個檔名——它是一份給人讀的 YAML
+        assert "GHOST_00001.png" not in stored
+        replayed = execute_spec(db, BuildSpec.from_yaml(stored), Catalog(db)).final
         assert set(replayed.images) == expected
     finally:
         db.execute(text("DELETE FROM manual_sets WHERE name = :n"), {"n": name})

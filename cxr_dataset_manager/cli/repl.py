@@ -12,15 +12,16 @@ from __future__ import annotations
 import cmd
 import shlex
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Any, Optional
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
 
+from cxr_dataset_manager.cli.main import _emit
 from cxr_dataset_manager.core.schema import BuildSpec
 from cxr_dataset_manager.core.types import SpecError
 from cxr_dataset_manager.db import crud
@@ -762,19 +763,33 @@ class ExploreShell(cmd.Cmd):
         if not self.session.steps:
             return console.print("  [dim]還沒有任何步驟[/]")
         spec = self.session.compile(strict_conflicts=False)
-        console.print(Syntax(spec.to_yaml(), "yaml", theme="ansi_dark"))
+        _emit(spec.to_yaml(), "yaml")
 
     def do_save(self, arg: str) -> None:
         """把 spec 存成 YAML 檔（之後可以用 cxr build 跑，或 load 回來繼續）。
 
-        save pneumonia_v5.yaml
+        save                    存到暫存檔，路徑會印出來
+        save pneumonia_v5.yaml  存到指定位置
+
+        探索到一半想留個底、或想拿去 diff 的時候用。commit 之後 spec 會自己
+        進到物件儲存，不需要另外存。
         """
-        path = arg.strip()
-        if not path:
-            return console.print("  用法：save <檔名.yaml>")
         spec = self.session.compile()
-        Path(path).expanduser().write_text(spec.to_yaml())
-        console.print(f"  [green]✓[/] 已存到 [bold]{path}[/]  sha256 {spec.sha256()[:16]}…")
+        raw = arg.strip()
+        if raw:
+            path = Path(raw).expanduser()
+        else:
+            # 沒給檔名就丟暫存目錄。探索過程中想存個底是很隨手的動作，
+            # 不該逼使用者當場想一個檔名跟一個位置。
+            tmp = Path(tempfile.gettempdir()) / "cxr-specs"
+            tmp.mkdir(parents=True, exist_ok=True)
+            path = tmp / f"{self.session.name}-{spec.sha256()[:12]}.yaml"
+        path.write_text(spec.to_yaml())
+        # soft_wrap：暫存路徑很長，被 Rich 折成兩行就複製不起來了
+        console.print(
+            f"  [green]✓[/] 已存到 [bold]{path}[/]  sha256 {spec.sha256()[:16]}…",
+            soft_wrap=True,
+        )
 
     def do_load(self, arg: str) -> None:
         """載入一份既有 spec，接著往下探索。
@@ -819,6 +834,7 @@ class ExploreShell(cmd.Cmd):
             console.print(Panel(body, title="[yellow]試跑完成[/]（資料庫沒有任何寫入）"))
         else:
             body += f"\ntarget category: {', '.join(result.target_categories) or '—'}"
+            body += f"\nspec → [dim]{result.spec_key}[/]"
             console.print(Panel(body, title=f"[green]✓[/] {name}@{version}"))
             console.print(f"  [dim]建立者 {author}[/]")
             console.print(f"  [dim]cxr show {name}@{version}　cxr export {name}@{version} -f zip[/]")

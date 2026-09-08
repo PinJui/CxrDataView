@@ -11,6 +11,7 @@ from cxr_dataset_manager.core.engine import Author, build, execute_spec
 from cxr_dataset_manager.core.schema import BuildSpec
 from cxr_dataset_manager.core.types import Catalog, SpecError
 from cxr_dataset_manager.db import crud
+from cxr_dataset_manager.storage import get_store
 
 TEST_AUTHOR = Author(name="pytest", email="pytest@example.com")
 
@@ -48,7 +49,6 @@ TRACKED_TABLES = [
     "manual_sets", "manual_set_versions", "manual_set_images",
     "manual_set_cls_annotations", "manual_set_det_annotations",
     "manual_set_target_categories", "manual_set_category_mappings",
-    "manual_set_build_specs",
 ]
 
 
@@ -110,12 +110,12 @@ def test_build_writes_a_complete_version(db, spec):
 
 
 def test_rebuilding_the_stored_spec_reproduces_the_result(db, spec):
-    """從資料庫把 spec 撈回來重跑，結果必須一模一樣。"""
+    """把 spec 從物件儲存撈回來重跑，結果必須一模一樣。"""
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     try:
         result = build(db, spec, name, "V1", author=TEST_AUTHOR)
-        stored = crud.version_summary(db, result.manual_set_version_id)["spec"]
-        replayed = execute_spec(db, BuildSpec.model_validate(stored), Catalog(db)).final
+        stored = crud.version_summary(db, result.manual_set_version_id)["spec_yaml"]
+        replayed = execute_spec(db, BuildSpec.from_yaml(stored), Catalog(db)).final
         assert replayed.images == result.execution.final.images
         assert replayed.cls == result.execution.final.cls
     finally:
@@ -140,7 +140,8 @@ def test_provenance_explains_every_dropped_image(db, spec):
         image_id = sorted(dropped)[0]
         trail = crud.explain(db, version_id, image_id=image_id)
         assert trail["found"] and not trail["in_final_set"]
-        assert trail["build_spec_id"] == result.build_spec_id
+        assert trail["spec_key"] == result.spec_key
+        assert trail["spec_status"] == "ok"
         decisions = [t["decision"] for t in trail["trail"] if t["entity_kind"] == "image"]
         assert "added" in decisions and "dropped" in decisions
         assert all(t["reason"] for t in trail["trail"]), "每筆裁決都要說得出原因"
@@ -167,7 +168,7 @@ def test_dry_run_writes_absolutely_nothing(db, spec):
 
     assert result.counts["images"] > 0
     assert result.manual_set_version_id is None
-    assert result.build_spec_id is None
+    assert result.spec_key is None, "試跑也不該碰物件儲存"
     assert crud.resolve_version(db, name, "V1") is None
     assert _row_counts(db) == before
 
@@ -190,6 +191,8 @@ def test_a_failed_build_rolls_everything_back(db):
 
     assert crud.resolve_version(db, name, "V1") is None
     assert _row_counts(db) == before, "失敗的 build 不該留下任何殘跡"
+    # spec 是在所有檢查都過了之後才寫上去的，所以這種失敗連物件都不會產生
+    assert get_store().get_spec(name, "V1") is None
 
 
 def test_incremental_category_mapping_does_not_destroy_other_sources(db):
@@ -336,7 +339,9 @@ def test_the_database_trigger_is_the_real_guarantee(db):
             ).scalar_one()
             db.execute(
                 text(
-                    "INSERT INTO manual_set_versions (manual_set_id, version) VALUES (:m, 'V1')"
+                    "INSERT INTO manual_set_versions"
+                    " (manual_set_id, version, created_by_name, created_by_email)"
+                    " VALUES (:m, 'V1', 'trigger test', 'trigger@example.com')"
                 ),
                 {"m": ms_id},
             )
@@ -416,8 +421,7 @@ def test_losing_a_version_race_says_who_won(db, spec, monkeypatch):
         # 輸的那一方不該留下任何殘跡
         assert db.execute(
             text(
-                "SELECT count(*) FROM manual_set_build_specs bs"
-                " JOIN manual_set_versions mv ON mv.id = bs.manual_set_version_id"
+                "SELECT count(*) FROM manual_set_versions mv"
                 " JOIN manual_sets ms ON ms.id = mv.manual_set_id"
                 " WHERE ms.name = :n"
             ),
@@ -447,12 +451,11 @@ def test_deleting_a_version_leaves_the_source_data_untouched(db, spec):
     }
     assert after == before, "原始資料被動到了"
 
-    # 成員關係、spec、溯源都該跟著消失
+    # 成員關係與溯源都該跟著消失
     for table, column in [
         ("manual_set_images", "manual_set_version_id"),
         ("manual_set_cls_annotations", "manual_set_version_id"),
         ("manual_set_target_categories", "manual_set_version_id"),
-        ("manual_set_build_specs", "manual_set_version_id"),
     ]:
         assert db.execute(
             text(f"SELECT count(*) FROM {table} WHERE {column} = :v"), {"v": version_id}
@@ -510,3 +513,96 @@ def test_describe_deletion_warns_about_the_spec(db, spec):
 def test_deleting_something_that_does_not_exist_fails_cleanly(db):
     with pytest.raises(SpecError, match="找不到"):
         crud.delete_manual_set(db, "definitely_not_here", "V1")
+
+
+# ---------------------------------------------------------------------------
+# spec 存在物件儲存這件事
+# ---------------------------------------------------------------------------
+
+
+def test_the_spec_lands_next_to_the_version_in_object_storage(db, spec):
+    """commit 之後 spec.yaml 就在 manual-sets/{名稱}/annotations/{版本}/ 底下。
+
+    位置是由 (名稱, 版本) 算出來的，資料庫沒有存路徑——所以任何人只要知道
+    版本叫什麼，就找得到產生它的那份配方。
+    """
+    name = f"pytest_{uuid.uuid4().hex[:8]}"
+    try:
+        result = build(db, spec, name, "V1", author=TEST_AUTHOR)
+        assert result.spec_key == f"{name}/annotations/V1/spec.yaml"
+
+        stored = get_store().get_spec(name, "V1")
+        assert stored == spec.to_yaml(), "存上去的必須跟送進來的逐位元組相同"
+        assert BuildSpec.from_yaml(stored).sha256() == spec.sha256()
+    finally:
+        _cleanup(db, name)
+        get_store().delete_spec(name, "V1")
+
+
+def test_the_fingerprint_catches_a_spec_that_was_edited_afterwards(db, spec):
+    """留著 spec_sha256 的理由：檔案自己沒辦法證明自己沒被動過。
+
+    物件儲存上的東西誰都能覆蓋，資料庫裡的指紋是唯一能拆穿它的依據。
+    """
+    name = f"pytest_{uuid.uuid4().hex[:8]}"
+    try:
+        version_id = build(db, spec, name, "V1", author=TEST_AUTHOR).manual_set_version_id
+        assert crud.load_spec(db, version_id)["status"] == "ok"
+
+        tampered = BuildSpec.from_yaml(get_store().get_spec(name, "V1"))
+        tampered.description = "有人手動改過這份 spec"
+        get_store().put_spec(name, "V1", tampered.to_yaml())
+
+        loaded = crud.load_spec(db, version_id)
+        assert loaded["status"] == "modified"
+        assert loaded["sha256"] != loaded["expected"]
+        assert "改過" in crud._spec_unavailable(loaded)
+    finally:
+        _cleanup(db, name)
+        get_store().delete_spec(name, "V1")
+
+
+def test_a_missing_spec_is_reported_not_guessed_at(db, spec):
+    """spec 被刪掉之後，這個版本就是重現不出來了——要講清楚，不能裝沒事。"""
+    name = f"pytest_{uuid.uuid4().hex[:8]}"
+    try:
+        version_id = build(db, spec, name, "V1", author=TEST_AUTHOR).manual_set_version_id
+        get_store().delete_spec(name, "V1")
+
+        loaded = crud.load_spec(db, version_id)
+        assert loaded["status"] == "missing" and loaded["yaml"] is None
+        assert "重現不出來" in crud._spec_unavailable(loaded)
+
+        # cxr why 依賴重跑 spec，沒有 spec 就該說沒有，而不是回一個空結果
+        trail = crud.explain(db, version_id, image_id=1)
+        assert not trail["found"] and "重現不出來" in trail["reason"]
+    finally:
+        _cleanup(db, name)
+
+
+def test_an_imported_version_has_no_spec_and_says_so(db):
+    """scripts/tools/ 匯進來的版本本來就沒有 spec，這不是壞掉。"""
+    name = f"pytest_{uuid.uuid4().hex[:8]}"
+    try:
+        db.execute(text("INSERT INTO manual_sets (name) VALUES (:n)"), {"n": name})
+        ms_id = db.execute(
+            text("SELECT id FROM manual_sets WHERE name = :n"), {"n": name}
+        ).scalar_one()
+        version_id = db.execute(
+            text(
+                "INSERT INTO manual_set_versions"
+                " (manual_set_id, version, created_by_name, created_by_email)"
+                " VALUES (:m, 'V1', 'importer', 'importer@example.com') RETURNING id"
+            ),
+            {"m": ms_id},
+        ).scalar_one()
+        db.commit()
+
+        loaded = crud.load_spec(db, version_id)
+        assert loaded["status"] == "none" and loaded["sha256"] is None
+        assert "匯入" in crud._spec_unavailable(loaded)
+        assert crud.version_summary(db, version_id)["created_by"] == (
+            "importer <importer@example.com>"
+        )
+    finally:
+        _cleanup(db, name)

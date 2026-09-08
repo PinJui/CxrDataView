@@ -11,12 +11,11 @@ Afterwards, nobody can usually answer these:
 
 | Question | Answer |
 |---|---|
-| Why is this image in the set? | `cxr why name@V1 --image aws_images/V1/AWS_00344.png
-cxr image 315                     # annotations, lineage, duplicates, users` |
+| Why is this image in the set? | `cxr why name@V1 --image <path>`, or `cxr image 315` for its annotations, lineage and duplicates |
 | Do train and val share a patient? | `cxr check-leakage train@V1 val@V1` |
-| Can I rebuild this in three months? | Yes — the spec is stored; splits use seeded hashing |
+| Can I rebuild this in three months? | Yes — every version keeps its spec; splits use seeded hashing |
 | What changed between versions? | `cxr diff name@V1 name@V2` |
-| Which annotations were dropped, why? | Recorded per entity; `cxr why` reads it back |
+| Which annotations were dropped, why? | `cxr why` re-runs the spec and reports each step's verdict |
 
 ## Setup
 ```bash
@@ -57,8 +56,9 @@ cxr(pneumonia_v5 441img)> commit -m pneumonia -v V5 --dry-run
 
 Other commands: `import` `pick` `intersect` `except` `map` `resolve` `include`
 `exclude` `preview` `steps` `images` `duplicates` `batches` `undo` `checkout`
-`spec` `load`; `help <command>` explains each. Every `source` opens a branch —
-`checkout <step>` moves between them. Leaving discards the session.
+`save` `load`; `help <command>` explains each. Every `source` opens a branch —
+`checkout <step>` moves between them; `save` keeps a spec without committing.
+Leaving discards the session.
 
 ## Running and inspecting
 
@@ -81,16 +81,16 @@ cxr rm name@V1                       # delete a version
 cxr lists add picks.txt              # register a long file-name list
 ```
 
-Lists over 200 names are stored in the database and referenced from the spec by
-`sha256`, so a spec stays ten lines long even with ten thousand file names.
-`import` and `pick` in the REPL do this for you.
-
-Prefer `--dry-run` first: it prints every step's counts and warnings without
-writing. `CXR_DEBUG=1` gives tracebacks.
+Each version keeps its spec at `<name>/annotations/<version>/spec.yaml` in the
+manual-sets bucket; the database holds only its sha256. Lists over 200 names go
+to the database and are referenced by `sha256`, so a spec stays ten lines long
+even with ten thousand file names — `import` and `pick` do this for you. Prefer
+`--dry-run` first: it prints every step's counts and warnings without writing.
+`CXR_DEBUG=1` gives tracebacks.
 
 ## Verifying
 ```bash
-python -m pytest tests/ -q                        # 101 tests
+python -m pytest tests/ -q                        # 173 tests
 psql -h localhost -p 5433 -U postgres -d cxr -f scripts/verify.sql
 ./scripts/acceptance.sh                           # rebuilds and checks everything
 ```

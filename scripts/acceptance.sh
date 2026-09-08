@@ -52,9 +52,9 @@ check "pytest 全數通過" "0" "$?"
 tail -1 /tmp/acc-pytest.log | sed 's/^/     /'
 
 step "3. dry-run 必須完全不寫資料庫"
-BEFORE=$($PSQL -c "SELECT (SELECT count(*) FROM manual_sets)||'/'||(SELECT count(*) FROM manual_set_build_specs)||'/'||(SELECT count(*) FROM manual_set_images)")
+BEFORE=$($PSQL -c "SELECT (SELECT count(*) FROM manual_sets)||'/'||(SELECT count(*) FROM manual_set_versions)||'/'||(SELECT count(*) FROM manual_set_images)")
 $CXR build specs/pneumonia_train.yaml -m dryrun_probe -v V1 --dry-run > /dev/null 2>&1
-AFTER=$($PSQL -c "SELECT (SELECT count(*) FROM manual_sets)||'/'||(SELECT count(*) FROM manual_set_build_specs)||'/'||(SELECT count(*) FROM manual_set_images)")
+AFTER=$($PSQL -c "SELECT (SELECT count(*) FROM manual_sets)||'/'||(SELECT count(*) FROM manual_set_versions)||'/'||(SELECT count(*) FROM manual_set_images)")
 check "試跑前後 row 數不變（$BEFORE）" "$BEFORE" "$AFTER"
 
 step "4. 建 train / val"
@@ -124,7 +124,36 @@ check "cxr rm 不動原始資料" "1058" "$($PSQL -c 'SELECT count(*) FROM image
 out=$($CXR why pneumonia_train@V1 --image aws_images/V1/AWS_00004.png 2>&1)
 [ $? -eq 0 ] && check "cxr why <image>" "ok" "ok" || check "cxr why <image>" "ok" "失敗"
 
-step "10. 錯誤路徑要給看得懂的訊息，不能吐 traceback"
+step "10. spec 是一份檔案：存得下來、原封不動、能重建"
+SPEC_KEY=$($PSQL -c "SELECT ms.name||'/annotations/'||mv.version||'/spec.yaml' FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='pneumonia_train' AND mv.version='V1'")
+check "spec 的物件路徑" "pneumonia_train/annotations/V1/spec.yaml" "$SPEC_KEY"
+$CXR spec pneumonia_train@V1 > /tmp/acc-spec.yaml 2>/dev/null
+# 重導向的檔案必須跟物件儲存上那份逐位元組相同。Rich 會把超出主控台寬度的
+# 內容裁掉，而重導向時沒有 tty——這裡就是在守那個坑。
+$PY - <<'PYEOF' > /tmp/acc-spec-cmp 2>&1
+from cxr_dataset_manager.storage import get_store
+import pathlib
+disk = pathlib.Path("/tmp/acc-spec.yaml").read_text()
+print("same" if disk == get_store().get_spec("pneumonia_train", "V1") else "different")
+PYEOF
+check "重導向存檔與物件儲存逐位元組相同" "same" "$(cat /tmp/acc-spec-cmp)"
+$CXR build /tmp/acc-spec.yaml -m specprobe -v V1 $AUTHOR > /dev/null 2>&1
+SPECDIFF=$($PSQL -c "
+WITH a AS (SELECT image_id FROM manual_set_images WHERE manual_set_version_id=(SELECT mv.id FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='pneumonia_train' AND mv.version='V1')),
+     b AS (SELECT image_id FROM manual_set_images WHERE manual_set_version_id=(SELECT mv.id FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='specprobe' AND mv.version='V1'))
+SELECT (SELECT count(*) FROM (SELECT * FROM a EXCEPT SELECT * FROM b) x) + (SELECT count(*) FROM (SELECT * FROM b EXCEPT SELECT * FROM a) y)")
+check "用存下來的 spec 重建，影像集合差異數" "0" "$SPECDIFF"
+check "同一份配方指紋相同" "1" "$($PSQL -c "SELECT count(DISTINCT spec_sha256) FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name IN ('pneumonia_train','specprobe') AND mv.version IN ('V1','V1-rerun')")"
+
+step "11. 刪掉版本時 spec.yaml 也要跟著消失"
+$CXR build specs/pneumonia_train.yaml -m specrm -v V1 $AUTHOR > /dev/null 2>&1
+$PY -c "from cxr_dataset_manager.storage import get_store; print('yes' if get_store().get_spec('specrm','V1') else 'no')" > /tmp/acc-specrm1 2>&1
+check "建好之後 spec.yaml 在" "yes" "$(cat /tmp/acc-specrm1)"
+$CXR rm specrm@V1 --yes > /dev/null 2>&1
+$PY -c "from cxr_dataset_manager.storage import get_store; print('yes' if get_store().get_spec('specrm','V1') else 'no')" > /tmp/acc-specrm2 2>&1
+check "刪掉之後 spec.yaml 不在" "no" "$(cat /tmp/acc-specrm2)"
+
+step "12. 錯誤路徑要給看得懂的訊息，不能吐 traceback"
 for c in "show no_such@V1" "spec no_such@V1" "export no_such@V1" "rm no_such@V1 --yes" \
          "image 99999999" \
          "show missing_at_sign" "validate /tmp/nope.yaml"; do

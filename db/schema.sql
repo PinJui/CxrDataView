@@ -216,6 +216,24 @@ CREATE TABLE manual_set_versions (
     id              BIGSERIAL PRIMARY KEY,
     manual_set_id   BIGINT NOT NULL REFERENCES manual_sets(id) ON DELETE CASCADE,
     version         TEXT NOT NULL,
+    -- Who built this dataset. Deliberately NOT a reference to annotators: that
+    -- table records who labelled images, and a data engineer who never labelled
+    -- anything does not belong in it. Plain text because there is no user
+    -- account system and this is an internal tool.
+    created_by_name   TEXT NOT NULL,
+    created_by_email  TEXT NOT NULL CHECK (created_by_email LIKE '%@%'),
+    -- sha256 of the spec YAML stored alongside this version in object storage,
+    -- at manual-sets/{name}/annotations/{version}/spec.yaml. The body is not
+    -- kept here: it is a document, it is read and edited as YAML, and a copy in
+    -- the database is one more thing that can disagree with the file.
+    --
+    -- The fingerprint stays because it is the one thing the file cannot vouch
+    -- for itself: it says whether two versions came from the same recipe, and
+    -- it detects a spec.yaml that was edited or lost after the fact.
+    --
+    -- NULL means this version was imported (see scripts/tools/), not built from
+    -- a spec, so there is nothing to reproduce it from.
+    spec_sha256     CHAR(64),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (manual_set_id, version)
 );
@@ -308,13 +326,14 @@ CREATE TABLE manual_set_category_mappings (
 );
 
 -- =========================================================
--- Build specs and provenance
+-- Externally supplied inputs
 -- =========================================================
 
 -- ---------------------------------------------------------
 -- manual_set_import_lists: the body of an externally supplied file-name list.
--- A spec stores only the sha256, keeping the spec JSON readable; this table
--- deduplicates naturally when several manual-sets use the same list.
+-- A spec references it by sha256 alone, so a spec that selects ten thousand
+-- file names stays readable; this table deduplicates naturally when several
+-- manual-sets are built from the same list.
 -- ---------------------------------------------------------
 CREATE TABLE manual_set_import_lists (
     sha256      CHAR(64) PRIMARY KEY,
@@ -322,37 +341,6 @@ CREATE TABLE manual_set_import_lists (
     source_note TEXT,                -- human-readable note, not a file locator
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
--- ---------------------------------------------------------
--- manual_set_build_specs: the spec that produced a version, stored verbatim
--- as JSONB so it can be diffed, reviewed and re-executed.
---
--- One spec per version (UNIQUE). Versions are immutable — you make a new
--- version rather than editing one — so there is no notion of "the same spec
--- was run five times" and no separate run table.
---
--- This is the whole provenance model: a version, and the spec that produced it.
--- Per-step results were stored here once and removed: two of their columns were
--- verbatim copies of the spec, the step count is `jsonb_array_length(spec ->
--- 'steps')`, and the statistics nothing ever read. "What did step 5 do" is a
--- function of (spec, data), and `cxr why` re-runs the spec to answer it.
--- ---------------------------------------------------------
-CREATE TABLE manual_set_build_specs (
-    id                     BIGSERIAL PRIMARY KEY,
-    manual_set_version_id  BIGINT NOT NULL UNIQUE
-        REFERENCES manual_set_versions(id) ON DELETE CASCADE,
-    spec                   JSONB NOT NULL,
-    spec_sha256            CHAR(64) NOT NULL,
-    -- Who built this dataset. Deliberately NOT a reference to annotators:
-    -- that table records who labelled images, and a data engineer who never
-    -- labelled anything does not belong in it. Stored as plain text because
-    -- there is no user account system and this is an internal tool.
-    created_by_name        TEXT NOT NULL,
-    created_by_email       TEXT NOT NULL CHECK (created_by_email LIKE '%@%'),
-    created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_build_specs_sha ON manual_set_build_specs (spec_sha256);
 
 -- =========================================================
 -- Views

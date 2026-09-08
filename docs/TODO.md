@@ -18,11 +18,16 @@ into a local cache first.
 Found while walking through `cxr explore` as a user. All fixed; kept here as a
 record of what the interface got wrong.
 
-1. **Tab completion was broken for every real batch name.** (fixed)
-   readline's default word delimiters include `@` and `-`, so `source aws@V<Tab>`
-   matched nothing and `source TB-<Tab>` broke on the hyphen. Only completion
-   from the very start of the name worked. Fixed by narrowing the delimiters to
-   whitespace.
+1. **Tab completion did nothing at all.** (fixed)
+   Two separate faults. readline's default word delimiters include `@` and `-`,
+   so `source aws@V<Tab>` matched nothing and `source TB-<Tab>` broke on the
+   hyphen; the delimiters are now narrowed to whitespace. Underneath that, the
+   Tab key was never bound: `cmd.Cmd` hardcodes `parse_and_bind("tab: complete")`,
+   GNU readline syntax that macOS's libedit build silently ignores. `preloop()`
+   now issues the right string for the backend in use, so completion works both
+   on the deployment target (Ubuntu, GNU) and on macOS. The first fix was
+   verified by calling the completer directly, which is exactly why the missing
+   binding went unnoticed — see `design_doc.md` §8.
 
 2. **`dedup` decided for you which copy survives.** (fixed)
    Running `dedup` is an explicit decision to discard duplicate images and the

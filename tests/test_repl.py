@@ -268,3 +268,20 @@ def test_steps_marks_the_head_and_the_open_branch_tips(shell, capsys):
     out = capsys.readouterr().out
     assert "← head" in out and "末端" in out
     assert "2 條分支還沒合併" in out
+
+
+def test_save_without_a_filename_goes_to_a_temp_file(shell, capsys):
+    """探索到一半想留個底是很隨手的動作，不該逼使用者當場想一個路徑。"""
+    import re
+    from pathlib import Path
+
+    run(shell, "source aws_images@V1 --annotation", "save")
+    out = capsys.readouterr().out
+    match = re.search(r"已存到 (\S+\.yaml)", out)
+    assert match, out
+
+    path = Path(match.group(1))
+    assert path.exists()
+    saved = BuildSpec.from_yaml(path.read_text())
+    assert saved.sha256() == shell.session.compile().sha256()
+    path.unlink()

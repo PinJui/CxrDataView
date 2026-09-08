@@ -1,12 +1,17 @@
 """Spec 執行引擎（design_doc.md §5）。
 
 `execute_spec` 依 steps 的宣告順序跑完，每步用指定 input 的輸出當輸入；
-`build` 再把結果落庫，而且只落兩樣東西：spec 原文 → manual_set_build_specs，
-最終選取 → manual_set_images / manual_set_cls_annotations /
-manual_set_det_annotations（加上 target category 與映射）。
+`build` 再把結果落地，分成兩個地方：spec 本體寫成 YAML 放物件儲存的
+manual-sets/{name}/annotations/{version}/spec.yaml，最終選取寫進資料庫的
+manual_set_images / manual_set_cls_annotations / manual_set_det_annotations
+（加上 target category 與映射），版本列上只留 spec 的 sha256。
 
-逐步的過程完全不存。探索不落庫，dry-run 不落庫，每一步的統計也不落庫——
-「這份 spec 產出了這個版本」就是全部的記錄，其餘由重跑 spec 得出。
+spec 先寫、資料庫後 commit。兩者不在同一個交易裡，所以順序就是保證：
+資料庫失敗只會留下一個沒人指向的 spec.yaml（下次同版本號建成時被覆蓋），
+反過來則會產生一個「存在但重現不出來」的版本，那是不能接受的。
+
+逐步的過程完全不存。探索不落庫，dry-run 不落庫也不寫物件，每一步的統計
+也不存——「這份 spec 產出了這個版本」就是全部的記錄，其餘由重跑 spec 得出。
 
 刻意沒有 content_hash 或快取層——每次 build 就是照順序整份重跑一遍
 （design_doc §1 principle 2）。真的遇到 build 太慢再加節點快取，op 的介面不用改。
@@ -31,6 +36,7 @@ from cxr_dataset_manager.core.types import (
     StepResult,
 )
 from cxr_dataset_manager.db import models as m
+from cxr_dataset_manager.storage import get_store
 
 
 @dataclass(frozen=True)
@@ -146,11 +152,11 @@ def execute_spec(
 
 @dataclass
 class BuildResult:
-    """dry-run 時 build_spec_id 與 manual_set_version_id 都是 None——
-    試跑不會在資料庫留下任何東西。"""
+    """dry-run 時 manual_set_version_id 與 spec_key 都是 None——
+    試跑不會在資料庫或物件儲存留下任何東西。"""
 
     manual_set_version_id: Optional[int]
-    build_spec_id: Optional[int]
+    spec_key: Optional[str]
     dry_run: bool
     execution: ExecutionResult
     target_categories: dict[str, int] = field(default_factory=dict)
@@ -266,6 +272,10 @@ def build(
             db.rollback()
             return BuildResult(None, None, True, execution)
 
+        assert author is not None
+        # 先把 spec 放上物件儲存。這一步失敗就整個放棄，什麼都還沒寫進資料庫。
+        spec_object_key = get_store().put_spec(manual_set_name, version, spec.to_yaml())
+
         manual_set = db.execute(
             select(m.ManualSet).where(m.ManualSet.name == manual_set_name)
         ).scalar_one_or_none()
@@ -274,19 +284,14 @@ def build(
             db.add(manual_set)
             db.flush()
 
-        version_row = m.ManualSetVersion(manual_set_id=manual_set.id, version=version)
-        db.add(version_row)
-        db.flush()
-
-        assert author is not None
-        build_spec = m.ManualSetBuildSpec(
-            manual_set_version_id=version_row.id,
-            spec=spec.to_jsonable(),
-            spec_sha256=spec.sha256(),
+        version_row = m.ManualSetVersion(
+            manual_set_id=manual_set.id,
+            version=version,
             created_by_name=author.name,
             created_by_email=author.email,
+            spec_sha256=spec.sha256(),
         )
-        db.add(build_spec)
+        db.add(version_row)
         db.flush()
 
         target_ids = _write_selection(db, version_row.id, execution)
@@ -308,7 +313,7 @@ def build(
         db.rollback()
         raise
 
-    return BuildResult(version_row.id, build_spec.id, False, execution, target_ids)
+    return BuildResult(version_row.id, spec_object_key, False, execution, target_ids)
 
 
 def _assert_annotations_are_mapped(execution: ExecutionResult) -> None:
@@ -360,11 +365,7 @@ def _assert_every_image_is_annotated(execution: ExecutionResult) -> None:
 def _version_owner(db: Session, manual_set_name: str, version: str) -> Optional[str]:
     """撞版本號時，告訴使用者是誰搶先建的。"""
     row = db.execute(
-        select(m.ManualSetBuildSpec.created_by_name, m.ManualSetBuildSpec.created_by_email)
-        .join(
-            m.ManualSetVersion,
-            m.ManualSetVersion.id == m.ManualSetBuildSpec.manual_set_version_id,
-        )
+        select(m.ManualSetVersion.created_by_name, m.ManualSetVersion.created_by_email)
         .join(m.ManualSet, m.ManualSet.id == m.ManualSetVersion.manual_set_id)
         .where(m.ManualSet.name == manual_set_name, m.ManualSetVersion.version == version)
     ).one_or_none()

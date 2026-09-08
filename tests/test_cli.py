@@ -126,10 +126,33 @@ def test_show(built):
 
 def test_spec_prints_runnable_yaml(built, tmp_path):
     from cxr_dataset_manager.core.schema import BuildSpec
+    from cxr_dataset_manager.storage import get_store
 
     output = ok("spec", f"{built['name']}@V1")
     # 印出來的東西必須真的能被 parse 回去（不是只是看起來像 YAML）
     assert BuildSpec.from_yaml(output).final
+    # 而且要跟物件儲存上那份逐位元組相同——`cxr spec x@V1 > x.yaml` 是官方的
+    # 保存方式，少一個字這份檔案就沒有意義了
+    assert output == get_store().get_spec(built["name"], "V1")
+
+
+def test_long_lines_survive_being_redirected_to_a_file(monkeypatch, capsys):
+    """回歸測試：`cxr spec x@V1 > x.yaml` 曾經會安靜地產出少字的 YAML。
+
+    起因是 console.print(Syntax(...))：Rich 的 Syntax 預設 word_wrap=False，
+    超出主控台寬度的部分是裁掉而不是折行，而重導向時沒有 tty，寬度就當成 80。
+    在自己的寬終端上完全看不出來，存下來的檔案卻已經壞了。
+    """
+    import sys as _sys
+
+    from cxr_dataset_manager.cli.main import _emit
+
+    body = "description: " + "。".join(f"第{i}段說明文字" for i in range(30)) + "\n"
+    assert len(body) > 200, "測試前提：這一行要遠超過 80 欄"
+
+    monkeypatch.setattr(_sys.stdout, "isatty", lambda: False, raising=False)
+    _emit(body, "yaml")
+    assert capsys.readouterr().out == body, "重導向時必須原文輸出，一個字都不能少"
 
 
 def test_why(built, db):
@@ -301,3 +324,32 @@ def test_image_reports_which_datasets_use_it(built, db):
 def test_image_on_a_missing_or_ambiguous_target_fails_cleanly():
     assert "找不到影像" in fails("image", "99999999")
     assert "找不到影像" in fails("image", "no_such_file.png")
+
+
+def test_errors_and_warnings_never_land_in_the_data_stream(built, tmp_path):
+    """`cxr spec x@V1 > x.yaml` 的 stdout 是資料。
+
+    警告或錯誤混進去就是產出一份壞掉的 YAML，所以它們一律走 stderr。
+    """
+    import subprocess
+    import sys
+
+    from cxr_dataset_manager.core.schema import BuildSpec
+    from cxr_dataset_manager.storage import get_store
+
+    # 把物件儲存上的 spec 改掉，讓 cxr spec 一定會發出「內容與指紋不符」警告
+    original = get_store().get_spec(built["name"], "V1")
+    tampered = BuildSpec.from_yaml(original)
+    tampered.description = "被動過手腳"
+    get_store().put_spec(built["name"], "V1", tampered.to_yaml())
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "cxr_dataset_manager.cli.main",
+             "spec", f"{built['name']}@V1"],
+            capture_output=True, text=True,
+        )
+        assert "有人改過這份" in proc.stderr.replace("\n", ""), proc.stderr
+        assert "⚠" not in proc.stdout
+        assert BuildSpec.from_yaml(proc.stdout).final, "stdout 必須是一份乾淨的 spec"
+    finally:
+        get_store().put_spec(built["name"], "V1", original)
