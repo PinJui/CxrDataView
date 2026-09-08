@@ -68,6 +68,30 @@ class ExploreShell(cmd.Cmd):
 
     # -- 基礎設施 ---------------------------------------------------------
 
+    def preloop(self) -> None:
+        """把 Tab 綁到補全。
+
+        readline 有兩套不相容的設定語法，而 Python 綁哪一套取決於平台：
+        部署目標 Ubuntu 是 GNU readline（`tab: complete`），開發機 macOS 是
+        libedit（`bind ^I rl_complete`）。送錯語法不會報錯，只是安靜地不生效。
+
+        cmd.Cmd.cmdloop 寫死送 GNU 那句，所以 macOS 上 Tab 完全沒反應。這裡
+        在 cmdloop 綁定之前（preloop 先跑）依實際後端送對的那句；兩邊都明確
+        綁，GNU 那條路就不必依賴 cmd.Cmd 的內部實作維持不變。
+        """
+        try:
+            import readline
+        except ImportError:  # pragma: no cover - 沒有 readline 的平台
+            return
+        # readline.backend 是 3.13 才有的官方判別方式，3.12 只能看 __doc__。
+        backend = getattr(readline, "backend", None)
+        if backend is None:
+            backend = "editline" if "libedit" in (readline.__doc__ or "") else "readline"
+        if backend == "editline":
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+
     def _update_prompt(self) -> None:
         counts = self.session.current.counts()
         state = f"{counts['images']}img" if self.session.head else "空"

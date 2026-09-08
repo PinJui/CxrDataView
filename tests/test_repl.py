@@ -223,6 +223,33 @@ def test_tab_completion_handles_at_signs_and_hyphens(shell):
     assert shell.complete_source("TB-", "source TB-", 7, 0) == ["TB-portal@V1"]
 
 
+def test_tab_is_actually_bound_on_both_readline_backends(shell, monkeypatch):
+    """回歸測試：補全函式一直是對的，壞掉的是按鍵綁定——所以上面那個測試全綠，
+    實際按 Tab 卻什麼都沒有。兩套 readline 的設定語法不相容，送錯不會報錯只是
+    不生效，而部署目標（Ubuntu/GNU）和開發機（macOS/libedit）剛好各用一套。"""
+    import readline
+
+    issued: list[str] = []
+    monkeypatch.setattr(readline, "parse_and_bind", issued.append)
+
+    for backend, expected in [("editline", "bind ^I rl_complete"), ("readline", "tab: complete")]:
+        issued.clear()
+        monkeypatch.setattr(readline, "backend", backend, raising=False)
+        shell.preloop()
+        assert issued == [expected], backend
+
+    # 3.12 沒有 readline.backend，得退回去看 __doc__。
+    monkeypatch.delattr(readline, "backend", raising=False)
+    for doc, expected in [
+        ("... using libedit readline.", "bind ^I rl_complete"),
+        ("... using GNU readline.", "tab: complete"),
+    ]:
+        issued.clear()
+        monkeypatch.setattr(readline, "__doc__", doc)
+        shell.preloop()
+        assert issued == [expected], doc
+
+
 def test_steps_marks_the_head_and_the_open_branch_tips(shell, capsys):
     """切換分支之後 head 會停在中間，而未合併的末端才是 union 會抓的東西——
     兩者是不同的資訊，要分別標出來。"""
