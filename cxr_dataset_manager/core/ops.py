@@ -319,6 +319,8 @@ def op_filter(
         return _filter_predicate(catalog, cand, step, before)
     if step.criterion == "annotated":
         return _filter_annotated(catalog, cand, step, before)
+    if step.criterion == "balance":
+        return _filter_balance(catalog, cand, step, before)
     return _filter_explicit_list(catalog, cand, step, before, file_names)
 
 
@@ -408,12 +410,122 @@ def _filter_sample(
     return StepResult(cand, stats, decisions, warnings)
 
 
+def _label_context(catalog: Catalog, cand: CandidateSet) -> dict[int, dict[str, Any]]:
+    """每張影像在目前候選集合裡的標註摘要，供 predicate 與 balance 使用。
+
+    一次算完再查表：每張圖各自去掃一遍候選集合的話，一個 filter 就變成
+    O(影像數 × 標註數)。
+    """
+    context: dict[int, dict[str, Any]] = {
+        image_id: {"labels": set(), "targets": set(), "annotators": set(), "n_annotations": 0}
+        for image_id in cand.images
+    }
+    for kind, pool in (("cls", cand.cls), ("det", cand.det)):
+        for ann_id in pool:
+            ann = catalog.annotation(kind, ann_id)
+            entry = context.get(ann.image_id)
+            if entry is None:
+                continue
+            entry["labels"].add(catalog.category(ann.category_id).name)
+            entry["annotators"].add(ann.annotator_name)
+            entry["n_annotations"] += 1
+            target = cand.category_targets.get(ann.category_id)
+            if target:
+                entry["targets"].add(target)
+    # predicate 的 `in` 對 list 比對，排序過的 list 也讓 stats 穩定
+    return {
+        image_id: {
+            "labels": sorted(entry["labels"]),
+            "targets": sorted(entry["targets"]),
+            "annotators": sorted(entry["annotators"]),
+            "n_annotations": entry["n_annotations"],
+        }
+        for image_id, entry in context.items()
+    }
+
+
+def _filter_balance(
+    catalog: Catalog, cand: CandidateSet, step: FilterStep, before: dict[str, int]
+) -> StepResult:
+    """把每個類別的影像數壓到 max_per_class 以下。
+
+    多標籤讓「每類剛好 N 張」無法同時成立——一張同時是 pneumonia 與
+    effusion 的圖，留下它會同時佔用兩個配額。做法是**從最罕見的類別開始**
+    依序配額，並優先選已經被選中的影像：罕見類別先拿滿自己的份，共用的
+    影像順便幫常見類別填數，常見類別才不會把罕見類別的樣本吃掉。
+
+    挑選順序是 hash(seed + image_id)，不是真隨機——同一份 spec 永遠挑出
+    同一批（跟 sample 切割一致）。
+    """
+    assert step.max_per_class and step.seed
+    context = _label_context(catalog, cand)
+    key = "targets" if step.by == "target" else "labels"
+
+    by_class: dict[str, list[int]] = defaultdict(list)
+    for image_id, entry in context.items():
+        for name in entry[key]:
+            by_class[name].append(image_id)
+    if not by_class:
+        raise SpecError(
+            f"step '{step.id}': 候選集合裡沒有任何"
+            + ("target category（要先做 category_map）" if step.by == "target" else "類別")
+            + "，無法平衡"
+        )
+
+    before_counts = {name: len(ids) for name, ids in by_class.items()}
+    keep: set[int] = set()
+    # 罕見的先配額，否則常見類別會先把共用的多標籤影像用掉
+    for name in sorted(by_class, key=lambda n: (len(by_class[n]), n)):
+        members = sorted(
+            by_class[name],
+            # 已經被選中的排前面，讓多標籤影像同時滿足多個配額
+            key=lambda i: (i not in keep, _hash_bucket(step.seed, str(i), 2**32), i),
+        )
+        keep.update(members[: step.max_per_class])
+
+    drop = cand.images - keep
+    decisions = _drop_images(cand, catalog, drop, "filter:balance")
+    cand.prune(catalog)
+
+    after_context = _label_context(catalog, cand)
+    after_counts: Counter[str] = Counter()
+    for entry in after_context.values():
+        for name in entry[key]:
+            after_counts[name] += 1
+
+    warnings: list[str] = []
+    over = {n: c for n, c in after_counts.items() if c > step.max_per_class}
+    if over:
+        warnings.append(
+            f"step '{step.id}': {', '.join(f'{n}={c}' for n, c in sorted(over.items()))} "
+            f"仍超過上限 {step.max_per_class}——這些類別的影像同時帶有其他類別的標籤，"
+            "留下它們是為了填滿那些類別的配額"
+        )
+
+    stats = {
+        "criterion": "balance",
+        "by": step.by,
+        "max_per_class": step.max_per_class,
+        "seed": step.seed,
+        "before": before,
+        "after": cand.counts(),
+        "images_dropped": len(drop),
+        "class_counts_before": dict(sorted(before_counts.items())),
+        "class_counts_after": dict(sorted(after_counts.items())),
+    }
+    return StepResult(cand, stats, decisions, warnings)
+
+
 def _filter_predicate(
     catalog: Catalog, cand: CandidateSet, step: FilterStep, before: dict[str, int]
 ) -> StepResult:
     assert step.expression
     tree = pred.compile_predicate(step.expression)
-    drop = {i for i in cand.images if not pred.evaluate(tree, catalog, i)}
+    context = _label_context(catalog, cand)
+    drop = {
+        i for i in cand.images
+        if not pred.evaluate(tree, catalog, i, context.get(i))
+    }
     decisions = _drop_images(cand, catalog, drop, "filter:predicate")
     cand.prune(catalog)
     stats = {

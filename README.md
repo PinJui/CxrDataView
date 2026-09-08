@@ -31,7 +31,6 @@ labelled by more than one batch (many disagreeing), seven inconsistent category
 namespaces, ~8% of images with no `subject_id`.
 
 ## Exploring — `cxr explore`
-
 An interactive session; nothing reaches the database until you commit.
 
 ```
@@ -47,17 +46,18 @@ cxr(pneumonia_v5 445img)> dedup TB-portal,aws_images
   441 img · 441 cls · 76 det
 cxr(pneumonia_v5 441img)> checkpoint after_dedup
 cxr(pneumonia_v5 441img)> split --mod 4 --keep 0,1,2 --seed s1
-cxr(pneumonia_v5 333img)> categories      # which local categories are unmapped
+cxr(pneumonia_v5 333img)> filter 'Pneumonia' in labels   # filter by annotation
+cxr(pneumonia_v5 333img)> balance 500 --seed b1          # cap each class
 cxr(pneumonia_v5 333img)> conflicts       # show contradictory annotations
 cxr(pneumonia_v5 333img)> rollback after_dedup    # not happy? go back
 cxr(pneumonia_v5 441img)> save pneumonia_v5.yaml
 cxr(pneumonia_v5 441img)> commit -m pneumonia -v V5 --dry-run
 ```
 
-Other commands: `import` `filter` `pick` `intersect` `except` `map` `resolve`
-`exclude` `preview` `steps` `images` `batches` `undo` `checkout` `spec` `load`;
-`help <command>` explains each. Every `source` opens a branch — `checkout
-<step>` moves between them. Leaving discards the session; `save` or `commit` it.
+Other commands: `import` `pick` `intersect` `except` `map` `resolve` `include`
+`exclude` `preview` `steps` `images` `duplicates` `batches` `undo` `checkout`
+`spec` `load`; `help <command>` explains each. Every `source` opens a branch —
+`checkout <step>` moves between them. Leaving discards the session.
 
 ## Running and inspecting
 
@@ -78,7 +78,7 @@ cxr check-leakage train@V1 val@V1
 cxr export name@V1 -f zip -o ./out   # COCO json + manifest csv + spec
 cxr rm name@V1                       # delete a version
 
-cxr lists add picks.txt              # register a long file-name list, get a sha256
+cxr lists add picks.txt              # register a long file-name list
 ```
 
 Lists over 200 names are stored in the database and referenced from the spec by
@@ -86,7 +86,7 @@ Lists over 200 names are stored in the database and referenced from the spec by
 `import` and `pick` in the REPL do this for you.
 
 Prefer `--dry-run` first: it prints every step's counts and warnings without
-touching the database. `CXR_DEBUG=1` gives tracebacks.
+writing. `CXR_DEBUG=1` gives tracebacks.
 
 ## Verifying
 ```bash

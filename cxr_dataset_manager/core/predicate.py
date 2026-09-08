@@ -3,15 +3,23 @@
 expression 用 Python 的比較語法寫，但**不是** eval——用 ast 解析後只放行
 白名單節點，所以 spec 裡的字串永遠不可能執行任意程式碼。
 
-可用欄位：
+影像本身的欄位：
     file_name, original_set, batch_version, width, height,
     blake3_hash, date_captured, subject_id, area
+
+這張影像在**目前候選集合裡**的標註（會隨前面的步驟變動）：
+    labels          local category 名稱，例如 ['Pneumonia']
+    targets         映射後的 target category，映射之前是空的
+    annotators      標註者名稱
+    n_annotations   標註筆數
 
 範例：
     date_captured >= '2022-01-01'
     width >= 1024 and height >= 1024
-    original_set in ['aws_images', 'DrLee'] and subject_id != None
-    regex(file_name, '^DL_2023')
+    'Pneumonia' in labels
+    'pneumonia' in targets and not ('normal' in targets)
+    n_annotations >= 2
+    'radiologist_senior' in annotators
 """
 
 from __future__ import annotations
@@ -49,7 +57,7 @@ _ALLOWED_NODES = (
     ast.IsNot,
 )
 
-_FIELDS = {
+_IMAGE_FIELDS = {
     "file_name",
     "original_set",
     "batch_version",
@@ -60,6 +68,12 @@ _FIELDS = {
     "subject_id",
     "area",
 }
+
+# 這些是「這張影像在目前候選集合裡的標註」，所以求值時需要候選集合的上下文，
+# 光看 ImageMeta 是算不出來的
+_LABEL_FIELDS = {"labels", "targets", "annotators", "n_annotations"}
+
+_FIELDS = _IMAGE_FIELDS | _LABEL_FIELDS
 
 _DATE_FIELDS = {"date_captured"}
 
@@ -86,8 +100,14 @@ def compile_predicate(expression: str) -> ast.Expression:
     return tree
 
 
-def row_of(meta: ImageMeta) -> dict[str, Any]:
+def row_of(meta: ImageMeta, labels: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """把一張影像攤成 predicate 看得到的欄位。
+
+    labels 由呼叫端事先算好（見 ops._label_context）——每張圖都去掃一次
+    候選集合的話，一個 filter 就是 O(影像數 × 標註數)。
+    """
     return {
+        **(labels or {"labels": [], "targets": [], "annotators": [], "n_annotations": 0}),
         "file_name": meta.file_name,
         "original_set": meta.original_set_name,
         "batch_version": meta.batch_version,
@@ -164,5 +184,8 @@ def _eval(node: ast.AST, row: dict[str, Any]) -> Any:
     raise SpecError(f"predicate 求值遇到未支援的節點 {type(node).__name__}")
 
 
-def evaluate(tree: ast.Expression, catalog: Catalog, image_id: int) -> bool:
-    return bool(_eval(tree, row_of(catalog.image(image_id))))
+def evaluate(
+    tree: ast.Expression, catalog: Catalog, image_id: int,
+    labels: Optional[dict[str, Any]] = None,
+) -> bool:
+    return bool(_eval(tree, row_of(catalog.image(image_id), labels)))

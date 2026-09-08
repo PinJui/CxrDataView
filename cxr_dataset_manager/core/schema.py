@@ -135,7 +135,7 @@ class FilterStep(StepBase):
 
     op: Literal["filter"] = "filter"
     input: str
-    criterion: Literal["sample", "predicate", "explicit_list", "annotated"]
+    criterion: Literal["sample", "predicate", "explicit_list", "annotated", "balance"]
 
     # criterion = sample
     method: Literal["hash_mod"] = "hash_mod"
@@ -146,6 +146,12 @@ class FilterStep(StepBase):
 
     # criterion = predicate
     expression: Optional[str] = None
+
+    # criterion = balance
+    max_per_class: Optional[int] = Field(None, ge=1)
+    by: Literal["target", "local"] = Field(
+        "target", description="用映射後的 target category 還是原始的 local category 分類"
+    )
 
     # criterion = explicit_list
     file_names: Optional[list[str]] = None
@@ -176,6 +182,13 @@ class FilterStep(StepBase):
                 raise ValueError(f"step '{self.id}': criterion=predicate 需要 expression")
         elif self.criterion == "annotated":
             pass  # 不需要參數：只留下目前集合裡帶有標註的影像
+        elif self.criterion == "balance":
+            if self.max_per_class is None:
+                raise ValueError(f"step '{self.id}': criterion=balance 需要 max_per_class")
+            if not self.seed:
+                raise ValueError(
+                    f"step '{self.id}': criterion=balance 需要 seed——挑哪幾張必須是決定性的"
+                )
         else:
             if bool(self.file_names) == bool(self.file_names_ref):
                 raise ValueError(

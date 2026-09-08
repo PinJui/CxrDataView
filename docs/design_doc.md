@@ -65,7 +65,15 @@ its reference in `input` and its key in the provenance tables.
   always cuts the same films. `key_field` should be `subject_id` so a patient's
   images never split; images with no subject fall back to `image_id` and the
   build reports how many were handled that way.
-- **`predicate`** — a metadata expression, e.g. `date_captured >= '2022-01-01'`.
+- **`predicate`** — an expression over the image (`file_name`, `width`,
+  `date_captured`, `subject_id`, …) *and* over its annotations as they stand in
+  the current set: `labels`, `targets`, `annotators`, `n_annotations`, so
+  `'Pneumonia' in labels` works and shifts as earlier steps map or resolve.
+- **`balance`** — cap every class at `max_per_class`. Multi-label makes "exactly
+  N of each" unsatisfiable since one image fills two quotas, so quotas are
+  filled rarest class first, preferring images already chosen: rare classes take
+  their share before common ones consume the shared images. Selection is
+  `hash(seed + image_id)`, deterministic like `sample`.
 - **`explicit_list`** — narrow to named files that must already be present.
   `on_missing` is `error` (default), `warn` or `ignore`.
 
@@ -175,18 +183,16 @@ the database, a spec is written only at commit, and maps 1:1 to a version
 producing a new version, so a run table would hold one row per spec. Dropped,
 along with the separate exploration-history table.
 
-**Conflicts are grouped by image, not by (image, target_category).** Grouped
-the latter way the conflict that matters most is invisible: when source A says
+**Conflicts are grouped by image, not by (image, target_category).** Grouped the
+latter way the conflict that matters most is invisible: when source A says
 *normal* and B says *pneumonia*, the two annotations land in different target
 groups, each of size one, and look consistent. Grouping by image and comparing
-each source's label *set* surfaces those as `contradiction`, distinct from
-`duplicate`. Resolution picks a winning *source* per image — keeping the
-senior's *pneumonia* beside the junior's *normal* would manufacture a
-self-contradictory row.
+each source's label *set* surfaces those as `contradiction`. Resolution picks a
+winning *source* per image — keeping the senior's *pneumonia* beside the
+junior's *normal* would manufacture a self-contradictory row.
 
 **Detection annotations are excluded from conflict resolution.** Disagreement
-between boxes is geometric (IoU), not two exclusive answers to one question;
-annotator precedence over boxes would produce false confidence.
+between boxes is geometric (IoU), not two exclusive answers to one question.
 
 **Dedup shows you the duplicates and lets you choose.** `dedup` is an explicit
 decision to discard duplicate images and their annotations, so which copy
@@ -201,9 +207,9 @@ reference one table, not "cls or det".
 
 **A manual-set may not contain unannotated images.** An original-set image may
 be "not yet labelled"; a manual-set is training-ready, so every image must carry
-at least one annotation. A deferred constraint trigger enforces this — deferred
-because a build writes images before annotations — and `build()` checks first so
-the error reports the count and the fix. `filter criterion=annotated` drops them
+an annotation. A deferred constraint trigger enforces this — deferred because a
+build writes images before annotations — and `build()` checks first so the error
+reports the count and the fix. `filter criterion=annotated` drops them
 explicitly, keeping the removal visible in the spec. This reverses what the
 original schema said on `manual_set_images`, whose composite foreign keys only
 constrained the opposite direction.
@@ -211,14 +217,14 @@ constrained the opposite direction.
 **Sourcing images brings their annotations.** `source ... --image` and
 `import_list` pull every annotation on the images they bring in, including
 batches that disagree — `conflict_resolve` settles that, not a silent choice at
-load time. `with_annotations: false` opts out.
+load time.
 
 **Exploration is permissive, the compiled spec is strict.** `map_category` maps
-one batch at a time, so it must *not* drop annotations whose category is not yet
-mapped — otherwise the first mapping deletes every other batch's labels.
-`compile()` then tightens the last `category_map` to `require_total=True` and
-the last `conflict_resolve` to `strict=True`. Rules that cannot decide a case
-never fall back silently: they fail and name the cases.
+one batch at a time, so it must *not* drop annotations not yet mapped —
+otherwise the first mapping deletes every other batch's labels. `compile()` then
+tightens the last `category_map` to `require_total=True` and the last
+`conflict_resolve` to `strict=True`. Rules that cannot decide never fall back
+silently: they fail and name the cases.
 
 **Provenance is recomputed, not stored.** A version and the spec that produced
 it are the entire record; how it was built is a pure function of (spec, data),
@@ -234,20 +240,18 @@ soon as those changed. Recomputing costs one build per `cxr why`.
 **`manual_override` names an id; everything else is a rule.** `filter`, `dedup`
 and the conflict rules describe a criterion and apply it everywhere.
 `manual_override` is the escape hatch for judgements that are not rules — a film
-is unusable, a patient withdrew consent, one label is wrong. Naming ids in the
-spec makes the decision reproducible and auditable instead of a hand-edit nobody
-can trace, and the `reason` travels into `cxr why`. Everything is addressed by
-id, images included: file names are only unique within an image batch, so a
-`set/version/name` path has to be parsed and resolved, and every such step is a
-chance to point at the wrong row. Including an image brings its annotations,
-mirroring `source --image`; naming an annotation loads its batch on demand.
-None of the four actions can silently do nothing — excluding what is absent, or
-including what is present, is an error, because a no-op reporting success is
-worse than a failure.
+is unusable, a patient withdrew consent, one label is wrong — and naming ids in
+the spec makes that reproducible and auditable instead of a hand-edit nobody can
+trace, with the `reason` travelling into `cxr why`. Everything is addressed by
+id, images included: file names are unique only within a batch, so a
+`set/version/name` path must be parsed and resolved, and every such step can
+point at the wrong row. Including an image brings its annotations, mirroring
+`source --image`; naming an annotation loads its batch on demand. None of the
+four actions can silently do nothing — a no-op reporting success is worse than
+a failure.
 
 **`filter` expressions are parsed, not evaluated.** `core/predicate.py` walks
-the Python AST against a node whitelist — a spec is reviewable, storable data,
-never executable code.
+the Python AST against a node whitelist — a spec is data, never code.
 
 **Deletion is the one exception to immutability.** `cxr rm` exists because a
 mistaken build otherwise strands a version number forever. It prints what will
@@ -264,7 +268,7 @@ blocks or deadlocks.
 
 **Every version records who built it.** `created_by_name` / `created_by_email`
 are plain columns, not a reference to `annotators` — that table records who
-*labelled* images. This is attribution, not authentication.
+*labelled*. This is attribution, not authentication.
 
 **A build is one transaction, and failure leaves nothing.** Any failing step
 rolls the whole thing back — no half-built version, and no record of the
@@ -286,7 +290,7 @@ the error message's job, not the database's.
 `ops.py` cannot make its own verification pass.
 
 ## 8. Testing
-153 tests, against a real PostgreSQL instance rather than SQLite: the deferred
+161 tests, against a real PostgreSQL instance rather than SQLite: the deferred
 constraint triggers, composite foreign keys, `ARRAY` and `JSONB` are all
 PostgreSQL-specific, and SQLite would test constraints that do not exist.
 
@@ -303,7 +307,7 @@ PostgreSQL-specific, and SQLite would test constraints that do not exist.
 
 `test_cli.py` exists because `cxr show` was once guaranteed to crash on a
 mistyped dict key and survived a long time — documented and recommended, but
-never actually run. Unit tests covered the query, not the line printing it.
+never run. Unit tests covered the query, not the line printing it.
 
 ## 9. Known limitations
 - Exploration state lives in the process. Leaving `cxr explore` discards it;

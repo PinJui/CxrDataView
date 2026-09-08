@@ -545,3 +545,124 @@ def test_excluding_the_last_annotation_is_caught_immediately(catalog):
     )
     with pytest.raises(SpecError, match="沒有任何標籤"):
         _override(catalog, cand, action="exclude_annotation", annotation_id=only_child)
+
+
+# ---------------------------------------------------------------------------
+# 依標籤篩選 / 類別平衡
+# ---------------------------------------------------------------------------
+
+
+def _mapped(catalog, *sources):
+    """幾個 annotation batch 合併後做完同名映射的候選集合。"""
+    from cxr_dataset_manager.core.schema import CategoryMapStep
+
+    cands = [src(catalog, s, annotation_batch=v) for s, v in sources]
+    merged = (
+        cands[0] if len(cands) == 1
+        else ops.op_union(catalog, cands, UnionStep(id="u", inputs=["a"] * len(cands))).candidates
+    )
+    return ops.op_category_map(
+        catalog, [merged], CategoryMapStep(id="m", input="u", merge_identical=True)
+    ).candidates
+
+
+def test_predicate_can_filter_by_label(catalog):
+    """建訓練集最常見的需求之一：只要某個類別的影像。"""
+    cand = _mapped(catalog, ("aws_images", "V1"))
+    result = ops.op_filter(
+        catalog, [cand],
+        FilterStep(id="f", input="x", criterion="predicate",
+                   expression="'Pneumonia' in labels"),
+    ).candidates
+
+    assert result.images, "應該留下一些影像"
+    assert len(result.images) < len(cand.images)
+    for ann_id in result.cls:
+        assert catalog.category(catalog.cls(ann_id).category_id).name == "Pneumonia"
+
+
+def test_predicate_sees_targets_annotators_and_counts(catalog):
+    cand = _mapped(catalog, ("aws_images", "V1"), ("aws_images", "V2"))
+
+    def keep(expression: str) -> set[int]:
+        return ops.op_filter(
+            catalog, [cand],
+            FilterStep(id="f", input="x", criterion="predicate", expression=expression),
+        ).candidates.images
+
+    assert keep("'Pneumonia' in targets")
+    assert keep("'radiologist_senior' in annotators")
+    # 被兩個 batch 都標過的影像
+    multi = keep("n_annotations >= 2")
+    assert multi and multi < cand.images
+    # 標籤欄位是可組合的，跟影像欄位混用也行
+    assert keep("'Pneumonia' in targets and width >= 100") == keep("'Pneumonia' in targets")
+
+
+def test_label_fields_are_empty_before_mapping(catalog):
+    """targets 在 category_map 之前是空的——這正確反映了當下的狀態。"""
+    cand = src(catalog, "aws_images", annotation_batch="V1")
+    result = ops.op_filter(
+        catalog, [cand],
+        FilterStep(id="f", input="x", criterion="predicate", expression="'pneumonia' in targets"),
+    ).candidates
+    assert not result.images
+    # 但 labels（local category）本來就看得到
+    with_labels = ops.op_filter(
+        catalog, [cand],
+        FilterStep(id="f", input="x", criterion="predicate", expression="'Pneumonia' in labels"),
+    ).candidates
+    assert with_labels.images
+
+
+def test_balance_caps_every_class(catalog):
+    cand = _mapped(catalog, ("aws_images", "V1"))
+    result = ops.op_filter(
+        catalog, [cand],
+        FilterStep(id="f", input="x", criterion="balance", max_per_class=40, seed="b"),
+    )
+    after = result.stats["class_counts_after"]
+    before = result.stats["class_counts_before"]
+    for name, count in after.items():
+        # 本來就不足上限的類別全部保留，其餘壓到上限
+        assert count == min(before[name], 40), f"{name}: {before[name]} → {count}"
+
+
+def test_balance_is_deterministic(catalog):
+    cand = _mapped(catalog, ("aws_images", "V1"))
+    step = FilterStep(id="f", input="x", criterion="balance", max_per_class=30, seed="same")
+    first = ops.op_filter(catalog, [cand], step).candidates.images
+    second = ops.op_filter(catalog, [cand], step).candidates.images
+    assert first == second
+
+    other = ops.op_filter(
+        catalog, [cand], step.model_copy(update={"seed": "different"})
+    ).candidates.images
+    assert other != first
+
+
+def test_balance_gives_rare_classes_their_full_quota(catalog):
+    """多標籤時常見類別會把共用的影像吃掉，所以要從最罕見的先配額。"""
+    cand = _mapped(catalog, ("aws_images", "V1"), ("aws_images", "V2"))
+    result = ops.op_filter(
+        catalog, [cand],
+        FilterStep(id="f", input="x", criterion="balance", max_per_class=50, seed="b"),
+    )
+    before, after = result.stats["class_counts_before"], result.stats["class_counts_after"]
+    rarest = min(before, key=lambda n: before[n])
+    assert after[rarest] == min(before[rarest], 50), "最罕見的類別沒拿滿配額"
+
+
+def test_balance_requires_a_seed(catalog):
+    with pytest.raises(Exception, match="seed"):
+        FilterStep(id="f", input="x", criterion="balance", max_per_class=10)
+
+
+def test_balance_by_target_needs_a_mapping_first(catalog):
+    cand = src(catalog, "aws_images", annotation_batch="V1")
+    with pytest.raises(SpecError, match="category_map"):
+        ops.op_filter(
+            catalog, [cand],
+            FilterStep(id="f", input="x", criterion="balance", max_per_class=10,
+                       seed="b", by="target"),
+        )

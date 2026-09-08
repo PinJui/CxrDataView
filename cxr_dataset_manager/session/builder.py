@@ -277,6 +277,14 @@ class ManualSetSession:
             )
         )
 
+    def balance(
+        self, max_per_class: int, seed: str, by: str = "target"
+    ) -> "ManualSetSession":
+        """把每個類別的影像數壓到 max_per_class 以下。"""
+        return self.filter(
+            criterion="balance", max_per_class=max_per_class, seed=seed, by=by
+        )
+
     def keep_annotated_only(self) -> "ManualSetSession":
         """剔除沒有標註的影像——manual-set 不接受它們。"""
         return self.filter(criterion="annotated")

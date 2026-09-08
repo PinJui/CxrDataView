@@ -219,6 +219,40 @@ class ExploreShell(cmd.Cmd):
         )
         self._report()
 
+    def do_balance(self, arg: str) -> None:
+        """把每個類別的影像數壓到上限以下。
+
+        balance 500 --seed b1              # 每個 target category 最多 500 張
+        balance 500 --seed b1 --by local   # 改用映射前的 local category
+
+        多標籤讓「每類剛好 N 張」無法同時成立——一張同時是 pneumonia 與
+        effusion 的圖會佔用兩個配額。做法是從最罕見的類別開始配額，罕見的
+        先拿滿，共用的影像順便幫常見類別填數。挑選用 hash(seed + image_id)，
+        同一組 seed 永遠挑出同一批。
+        """
+        args = self._args(arg)
+        opts = self._kv(args)
+        positional = [a for a in args if not a.startswith("-") and a.isdigit()]
+        if not positional:
+            return console.print('  用法：balance <每類上限> --seed <seed> [--by target|local]')
+        if "seed" not in opts:
+            return console.print("  [red]✗[/] 需要 --seed：挑哪幾張必須是決定性的")
+        self.session.balance(
+            max_per_class=int(positional[0]), seed=opts["seed"], by=opts.get("by", "target")
+        )
+        self._report()
+        report = self.session.reports[self.session.head].stats
+        console.print(
+            _table(
+                "類別分布",
+                ["類別", "平衡前", "平衡後"],
+                [
+                    [name, before, report["class_counts_after"].get(name, 0)]
+                    for name, before in report["class_counts_before"].items()
+                ],
+            )
+        )
+
     def do_filter(self, arg: str) -> None:
         """依 metadata 條件篩選。
 
@@ -226,9 +260,14 @@ class ExploreShell(cmd.Cmd):
         filter width >= 512 and original_set in ['aws_images', 'DrLee']
         filter regex(file_name, '^DL_2023')
         filter --annotated                    # 只留有標註的影像
+        filter 'Pneumonia' in labels          # 依標註篩選
+        filter 'pneumonia' in targets and not ('normal' in targets)
+        filter n_annotations >= 2             # 至少兩位標註過
 
-        可用欄位：file_name, original_set, batch_version, width, height,
+        影像欄位：file_name, original_set, batch_version, width, height,
         area, blake3_hash, date_captured, subject_id
+
+        標註欄位（隨前面的步驟變動）：labels, targets, annotators, n_annotations
         """
         if arg.strip() in ("--annotated", "annotated"):
             self.session.keep_annotated_only()
@@ -799,7 +838,8 @@ class ExploreShell(cmd.Cmd):
 BANNER = """[bold cyan]cxr explore[/] —— 互動式資料集建構
 
   [bold]來源[/]    source aws_images@V1 --annotation   import DrLee@V1 list.txt
-  [bold]縮限[/]    split --mod 4 --keep 0,1,2 --seed s1    filter width >= 512    pick list.txt
+  [bold]縮限[/]    split --mod 4 --keep 0,1,2 --seed s1    filter 'x' in targets    balance 500 --seed b
+            pick list.txt
   [bold]整理[/]    union   duplicates   dedup --keep 5,712   merge_identical   map aws_images@V1 A=a
   [bold]人工[/]    include / exclude <image|cls|det> <id> ["原因"]
   [bold]檢查[/]    preview   steps   categories   conflicts   images   batches
