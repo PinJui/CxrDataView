@@ -1,0 +1,38 @@
+[tool.poetry]
+name = "cxr-dataset-manager"
+version = "0.2.0"
+description = "CXR ML dataset 管理系統：把散落各處的 original-set 組成可重現、可溯源的 manual-set"
+authors = ["Jeffery Huang <jefferyhuang@sgsc.ai>"]
+readme = "README.md"
+packages = [{ include = "cxr_dataset_manager" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+sqlalchemy = "^2.0.52"
+psycopg = { extras = ["binary"], version = "^3.2" }
+pydantic = "^2.13"
+pydantic-settings = "^2.15"
+typer = "^0.27"
+rich = "^14.0"
+pyyaml = "^6.0"
+blake3 = "^1.0"
+boto3 = "^1.43"
+pillow = "^11.0"
+
+[tool.poetry.group.parquet.dependencies]
+# 只有 scripts/tools/ 的匯入腳本需要；核心不依賴它們
+pandas = "^2.2"
+pyarrow = "^18.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[tool.poetry.scripts]
+cxr = "cxr_dataset_manager.cli.main:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

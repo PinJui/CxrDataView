@@ -1,0 +1,57 @@
+description: >
+  示範：aws_images 與 TB-portal 先合併去重，再加入 indo_vnn，
+  映射到統一的 target category，最後解決標註衝突。
+steps:
+  - id: base_aws
+    op: source
+    original_set: aws_images
+    annotation_batch: V1
+
+  - id: base_tb
+    op: source
+    original_set: TB-portal
+    annotation_batch: V1
+
+  - id: round1
+    op: union
+    inputs: [base_aws, base_tb]
+
+  - id: round1_deduped
+    op: dedup
+    input: round1
+    key: blake3
+    source_priority: [TB-portal, aws_images]
+
+  - id: base_indo
+    op: source
+    original_set: indo_vnn
+    annotation_batch: V2
+
+  - id: round2
+    op: union
+    inputs: [round1_deduped, base_indo]
+
+  - id: round2_deduped
+    op: dedup
+    input: round2
+    key: blake3
+    source_priority: [TB-portal, aws_images, indo_vnn]
+
+  - id: mapped
+    op: category_map
+    input: round2_deduped
+    mapping:
+      aws_images@V1: {Pneumonia: pneumonia, Normal: normal, Effusion: effusion}
+      indo_vnn@V2:   {PNEU: pneumonia, NORM: normal, EFFU: effusion}
+      TB-portal@V1:  {TB: tb, Normal: normal, Pneumonia: pneumonia}
+
+  - id: resolved
+    op: conflict_resolve
+    input: mapped
+    rules:
+      - rule: annotator_precedence
+        annotator_precedence: [radiologist_senior, radiologist_junior, annotator_indo_b, annotator_indo_a, dr_lee]
+      - rule: highest_score
+    strict: true
+
+final: resolved

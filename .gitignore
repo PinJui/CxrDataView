@@ -1,0 +1,17 @@
+# 虛擬環境與快取
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 設定與機密（連線字串、金鑰、建立者身分）
+.env
+
+# 執行時產生的東西
+logs/
+*.jsonl
+
+# 重構前的產物，只留在本機備查
+/legacy/
+
+.DS_Store

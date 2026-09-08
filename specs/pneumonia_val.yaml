@@ -1,0 +1,58 @@
+description: >
+  Pneumonia 驗證集：三個來源合併去重後，依 subject_id 決定性切出剩下的 1/4（train 的補集）。
+  同一個 seed 永遠切出同一批病患，val 用同一組 seed 取補集，
+  兩邊保證不會有同一位病患的影像（§8 原則 5）。
+steps:
+  - id: aws
+    op: source
+    original_set: aws_images
+    annotation_batch: V2          # V2 是主治醫師的判讀，優先於 V1
+
+  - id: tb
+    op: source
+    original_set: TB-portal
+    annotation_batch: V1
+
+  - id: drlee
+    op: source
+    original_set: DrLee
+    annotation_batch: V1
+
+  - id: pooled
+    op: union
+    inputs: [aws, tb, drlee]
+
+  - id: pooled_deduped
+    op: dedup
+    input: pooled
+    key: blake3
+    source_priority: [TB-portal, DrLee, aws_images]
+
+  - id: train_split
+    op: filter
+    input: pooled_deduped
+    criterion: sample
+    method: hash_mod
+    key_field: subject_id
+    mod: 4
+    keep_remainder: [3]
+    seed: pneumonia-2026-split
+
+  - id: mapped
+    op: category_map
+    input: train_split
+    mapping:
+      aws_images@V2: {Pneumonia: pneumonia, Normal: normal, Effusion: effusion}
+      TB-portal@V1:  {TB: tb, Normal: normal, Pneumonia: pneumonia}
+      DrLee@V1:      {pneumonia: pneumonia, normal: normal}
+
+  - id: resolved
+    op: conflict_resolve
+    input: mapped
+    rules:
+      - rule: annotator_precedence
+        annotator_precedence: [radiologist_senior, dr_lee, radiologist_junior]
+      - rule: highest_score
+    strict: true
+
+final: resolved

@@ -1,0 +1,243 @@
+"""`cxr explore` 的指令解析層。
+
+REPL 只是皮：這裡測的是「指令列有沒有正確翻譯成 session 呼叫」，
+以及探索完存出來的 spec 能不能原封不動被 cxr build 重跑。
+業務邏輯本身的測試在 test_ops.py / test_engine.py。
+"""
+
+import uuid
+
+import pytest
+from sqlalchemy import text
+
+from cxr_dataset_manager.cli.repl import ExploreShell
+from cxr_dataset_manager.core.engine import execute_spec
+from cxr_dataset_manager.core.schema import BuildSpec
+from cxr_dataset_manager.core.types import Catalog
+
+
+@pytest.fixture
+def shell(db):
+    sh = ExploreShell(name=f"pytest_{uuid.uuid4().hex[:8]}")
+    yield sh
+    sh.db.execute(text("DELETE FROM manual_sets WHERE name = :n"), {"n": sh.session.name})
+    sh.db.commit()
+    sh.db.close()
+
+
+def run(shell, *lines):
+    for line in lines:
+        shell.onecmd(line)
+    return shell.session
+
+
+def test_source_translates_to_the_right_batch_kind(shell):
+    run(shell, "source aws_images@V1 --annotation")
+    step = shell.session.steps[-1]
+    assert step.annotation_batch == "V1" and step.image_batch is None
+
+    run(shell, "source aws_images@V1 --image")
+    step = shell.session.steps[-1]
+    assert step.image_batch == "V1" and step.annotation_batch is None
+
+
+def test_ambiguous_source_refuses_to_guess(shell):
+    """aws_images@V1 同時有 image 與 annotation batch —— 猜錯的代價太大。"""
+    run(shell, "source aws_images@V1")
+    assert not shell.session.steps, "沒指定種類時不該擅自挑一個"
+
+
+def test_unknown_source_is_reported_not_crashed(shell):
+    run(shell, "source no_such_set@V9 --image")
+    assert not shell.session.steps
+
+
+def test_split_parses_its_options(shell):
+    run(shell, "source aws_images@V1 --image",
+        "split --mod 4 --keep 0,1,2 --seed my-seed --key subject_id")
+    step = shell.session.steps[-1]
+    assert (step.mod, step.keep_remainder, step.seed) == (4, [0, 1, 2], "my-seed")
+    assert step.key_field == "subject_id"
+
+
+def test_map_parses_key_value_pairs(shell):
+    run(shell, "source aws_images@V1 --annotation",
+        "map aws_images@V1 Pneumonia=pneumonia Normal=normal Effusion=effusion")
+    assert shell.session.steps[-1].mapping == {
+        "aws_images@V1": {"Pneumonia": "pneumonia", "Normal": "normal", "Effusion": "effusion"}
+    }
+
+
+def test_dedup_parses_source_priority(shell):
+    run(shell, "source aws_images@V1 --image", "dedup TB-portal, DrLee ,aws_images")
+    assert shell.session.steps[-1].source_priority == ["TB-portal", "DrLee", "aws_images"]
+
+
+def test_a_bad_command_leaves_the_session_intact(shell):
+    """打錯字不該讓整個探索作廢。"""
+    run(shell, "source aws_images@V1 --image")
+    before = len(shell.session.steps)
+    run(shell, "split --mod notanumber --keep 0 --seed s", "nonsense_command", "map")
+    assert len(shell.session.steps) == before
+    run(shell, "split --mod 2 --keep 0 --seed s")
+    assert len(shell.session.steps) == before + 1
+
+
+def test_checkpoint_and_rollback_from_the_command_line(shell):
+    run(shell, "source aws_images@V1 --image", "checkpoint cp")
+    before = shell.session.current.counts()
+    run(shell, "split --mod 2 --keep 0 --seed abandoned")
+    assert shell.session.current.counts() != before
+    run(shell, "rollback cp")
+    assert shell.session.current.counts() == before
+
+
+def test_save_produces_a_spec_that_cxr_build_reproduces(shell, db, tmp_path):
+    """REPL 探索 → save → cxr build，結果必須一模一樣。
+
+    這是「三種介面共用同一套 API」真正的驗收：探索用的路徑跟正式產出
+    用的路徑不能分岔。
+    """
+    run(
+        shell,
+        "source aws_images@V1 --annotation",
+        "source TB-portal@V1 --annotation",
+        "union",
+        "dedup TB-portal,aws_images",
+        "split --mod 4 --keep 0,1,2 --seed roundtrip",
+        "merge_identical",
+    )
+    expected = shell.session.current
+
+    out = tmp_path / "spec.yaml"
+    shell.onecmd(f"save {out}")
+    assert out.exists()
+
+    replayed = execute_spec(db, BuildSpec.from_yaml(out.read_text()), Catalog(db)).final
+    assert replayed.images == expected.images
+    assert replayed.cls == expected.cls
+    assert replayed.det == expected.det
+    assert replayed.category_targets == expected.category_targets
+
+
+def test_load_resumes_an_existing_spec(shell, tmp_path):
+    run(shell, "source TB-portal@V1 --annotation", "merge_identical")
+    out = tmp_path / "spec.yaml"
+    shell.onecmd(f"save {out}")
+    counts = shell.session.current.counts()
+
+    fresh = ExploreShell(name="pytest_reload")
+    try:
+        fresh.onecmd(f"load {out}")
+        assert fresh.session.current.counts() == counts
+        # 載回來之後還能繼續往下探索
+        fresh.onecmd("split --mod 2 --keep 0 --seed after-load")
+        assert fresh.session.current.counts()["images"] < counts["images"]
+    finally:
+        fresh.db.close()
+
+
+def test_commit_from_the_repl_creates_a_version(shell, db):
+    run(shell, "source TB-portal@V1 --annotation", "merge_identical",
+        f"commit -m {shell.session.name} -v V1"
+        " --author-name pytest --author-email pytest@example.com")
+    from cxr_dataset_manager.db import crud
+
+    version_id = crud.resolve_version(db, shell.session.name, "V1")
+    assert version_id is not None
+    assert crud.version_summary(db, version_id)["images"] > 0
+
+
+def test_dry_run_commit_from_the_repl_writes_nothing(shell, db):
+    from cxr_dataset_manager.db import crud
+
+    run(shell, "source TB-portal@V1 --annotation", "merge_identical",
+        f"commit -m {shell.session.name} -v V1 --dry-run")
+    assert crud.resolve_version(db, shell.session.name, "V1") is None
+
+
+def test_checkout_moves_between_branches(shell):
+    """每個 source 都開一條分支；沒有 checkout 就只能加工剛好在頭上的那條。"""
+    run(shell, "source aws_images@V1 --annotation", "source DrLee@V1 --annotation")
+    assert shell.session.head == "source_2"
+
+    run(shell, "checkout source_1", "split --mod 2 --keep 0 --seed branch-a")
+    assert shell.session.steps[-1].input == "source_1"
+
+    run(shell, "checkout source_2", "split --mod 2 --keep 1 --seed branch-b")
+    assert shell.session.steps[-1].input == "source_2"
+
+    # 兩條分支都還在，union 應該把兩邊的 filter 結果接起來
+    run(shell, "union")
+    assert set(shell.session.steps[-1].inputs) == {"filter_1", "filter_2"}
+
+
+def test_checkout_rejects_an_unknown_step(shell):
+    run(shell, "source aws_images@V1 --annotation")
+    before = shell.session.head
+    run(shell, "checkout no_such_step")
+    assert shell.session.head == before
+
+
+def test_resolve_manual_keeps_the_annotation_you_name(shell):
+    """conflicts 印出 annotation id，resolve manual 就用那個 id 指定留哪一筆。"""
+    run(shell, "source aws_images@V1 --annotation", "source aws_images@V2 --annotation",
+        "union", "merge_identical")
+    conflicts = shell.session.find_conflicts()
+    assert conflicts, "測試前提：要有衝突"
+
+    group = conflicts[0]
+    sources = list(group.by_source.values())
+    keep_id = sources[0]["annotation_ids"][0]
+    doomed = [a for src in sources[1:] for a in src["annotation_ids"]]
+
+    run(shell, f'resolve manual {keep_id} "人工判讀"')
+    assert keep_id in shell.session.current.cls
+    for ann_id in doomed:
+        assert ann_id not in shell.session.current.cls
+
+
+def test_conflicts_prints_annotation_ids(shell, capsys):
+    """沒有 id 就沒東西可以指定給 resolve manual。"""
+    run(shell, "source aws_images@V1 --annotation", "source aws_images@V2 --annotation",
+        "union", "merge_identical")
+    capsys.readouterr()
+    run(shell, "conflicts 1")
+    out = capsys.readouterr().out
+    group = shell.session.find_conflicts()[0]
+    any_id = next(iter(group.by_source.values()))["annotation_ids"][0]
+    assert f"#{any_id}" in out
+    assert "resolve manual" in out
+
+
+def test_tab_completion_handles_at_signs_and_hyphens(shell):
+    """回歸測試：readline 預設把 @ 和 - 當斷詞字元，所有真實的 batch 名稱
+    （aws_images@V1、TB-portal@V1）補全都是壞的，只有從頭打才有用。"""
+    import readline
+
+    assert "@" not in readline.get_completer_delims()
+    assert "-" not in readline.get_completer_delims()
+
+    for prefix in ("aws_images@", "aws_images@V"):
+        assert shell.complete_source(prefix, f"source {prefix}", 7, 0), prefix
+    assert shell.complete_source("TB-", "source TB-", 7, 0) == ["TB-portal@V1"]
+
+
+def test_steps_marks_the_head_and_the_open_branch_tips(shell, capsys):
+    """切換分支之後 head 會停在中間，而未合併的末端才是 union 會抓的東西——
+    兩者是不同的資訊，要分別標出來。"""
+    run(shell, "source aws_images@V1 --annotation", "split --mod 2 --keep 0 --seed a",
+        "source DrLee@V1 --annotation", "split --mod 2 --keep 1 --seed b",
+        "checkout filter_1")
+
+    described = {r["step_id"]: r for r in shell.session.describe()}
+    assert described["filter_1"]["head"] and not described["filter_2"]["head"]
+    # 兩條 filter 都還沒被消費；兩個 source 已經被各自的 filter 消費掉了
+    assert described["filter_1"]["open"] and described["filter_2"]["open"]
+    assert not described["source_1"]["open"] and not described["source_2"]["open"]
+
+    capsys.readouterr()
+    run(shell, "steps")
+    out = capsys.readouterr().out
+    assert "← head" in out and "末端" in out
+    assert "2 條分支還沒合併" in out
