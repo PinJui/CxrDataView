@@ -295,11 +295,11 @@ FKs, `ARRAY` and `JSONB` do not exist there, so SQLite would test nothing real.
 | `test_cli.py` | Every command actually executes and fails cleanly |
 | `test_import_lists.py` | Long file-name lists: storage, refs, the round trip |
 
-`test_cli.py` exists because `cxr show` was once guaranteed to crash on a
-mistyped dict key while being documented and recommended: unit tests covered the
-query, not the line printing it. The same gap recurred twice — Tab completion
-tested by calling the completer while the key was never bound, and a spec losing
-text on the way to a file — so output paths are now tested as output paths.
+`test_cli.py` exists because interface code failed three times in ways the unit
+tests could not see — a command crashing on a mistyped dict key, Tab never bound
+to the completer, a spec losing text on its way to a file. Each is written up in
+`fixed_issues.md`; the common cause was testing the query and never the line
+printing it, so output paths are now exercised as output paths.
 
 ## 9. Known limitations
 - Exploration state lives in the process; leaving `cxr explore` discards it.

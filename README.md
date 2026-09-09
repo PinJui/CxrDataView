@@ -96,5 +96,5 @@ psql -h localhost -p 5433 -U postgres -d cxr -f scripts/verify.sql
 ```
 
 `scripts/verify.sql` bypasses all Python and recomputes the guarantees straight
-from the data, so a bug in the logic cannot make its own checks pass.
-Architecture: `docs/design_doc.md`.
+from the data, so a bug in the logic cannot make its own checks pass. In `docs/`:
+`design_doc.md` (architecture), `TODO.md` (open work), `fixed_issues.md`.
