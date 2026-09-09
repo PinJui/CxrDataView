@@ -47,6 +47,47 @@ def _get_or_create(db, model, defaults=None, **keys):
     return row
 
 
+def _reject_duplicate_annotations(rows: list[dict], kind: str, key_fields: list[str]) -> None:
+    """在送進資料庫之前先擋下重複的標註。
+
+    schema 上有 UNIQUE 約束，所以重複本來就會被擋——但那是在 bulk_insert
+    中途炸出一個 psycopg 錯誤，只講得出「某個鍵重複了」，不會告訴你是
+    parquet 的第幾列、有幾組、長什麼樣。匯入是一次處理數十萬列的動作，
+    訊息說不清楚就等於要人自己去 parquet 裡大海撈針。
+    """
+    seen: dict[tuple, int] = {}
+    dupes: list[tuple[int, int, tuple]] = []
+    for i, row in enumerate(rows):
+        key = tuple(
+            tuple(row[f]) if isinstance(row[f], list) else _hashable(row[f])
+            for f in key_fields
+        )
+        if key in seen:
+            dupes.append((seen[key], i, key))
+        else:
+            seen[key] = i
+    if not dupes:
+        return
+    console.print(f"[bold red]✗[/] {kind} 有 {len(dupes)} 組完全重複的標註：")
+    for first, again, key in dupes[:10]:
+        console.print(f"    第 {first} 列與第 {again} 列相同  {dict(zip(key_fields, key))}")
+    if len(dupes) > 10:
+        console.print(f"    …另外還有 {len(dupes) - 10} 組")
+    die(
+        f"{kind}：一個 annotation batch 裡不該有重複的標註條目。"
+        "請先在來源 parquet 去重再匯入（重複的列不帶任何資訊，只佔空間）。"
+    )
+
+
+def _hashable(value):
+    """把 parquet 讀出來的巢狀值轉成可以放進 set 的形狀。"""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _hashable(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable(v) for v in value)
+    return value
+
+
 def import_original_set(
     root: Path, dataset: str, ann_version: str, dry_run: bool = False, replace: bool = False
 ) -> None:
@@ -226,6 +267,10 @@ def import_original_set(
                         "annotator_id": annotator_map[r["annotator_id"]],
                     }
                 )
+            _reject_duplicate_annotations(
+                cls_rows, "cls_annotations",
+                ["image_id", "category_id", "annotator_id", "score"],
+            )
             db.bulk_insert_mappings(m.ClsAnnotation, cls_rows)
 
         det_rows = []
@@ -250,6 +295,11 @@ def import_original_set(
                         "annotator_id": annotator_map[r["annotator_id"]],
                     }
                 )
+            _reject_duplicate_annotations(
+                det_rows, "det_annotations",
+                ["image_id", "category_id", "annotator_id", "score",
+                 "bbox", "segmentation", "iscrowd"],
+            )
             db.bulk_insert_mappings(m.DetAnnotation, det_rows)
 
         db.commit()

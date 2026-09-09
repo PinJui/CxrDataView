@@ -188,6 +188,11 @@ class ClsAnnotation(Base):
             ondelete="CASCADE",
         ),
         UniqueConstraint("id", "image_id"),
+        # 一個 batch 裡不該有同一筆主張出現兩次；這些欄位都 NOT NULL，
+        # 所以一般的 UNIQUE 語意就夠了
+        UniqueConstraint(
+            "annotation_batch_id", "image_id", "category_id", "annotator_id", "score"
+        ),
         Index("idx_cls_annotations_batch", "annotation_batch_id"),
         Index("idx_cls_annotations_image", "image_id"),
         Index("idx_cls_annotations_category", "category_id"),
@@ -217,6 +222,14 @@ class DetAnnotation(Base):
         CheckConstraint("array_length(bbox, 1) = 4"),
         CheckConstraint("iscrowd IN (0, 1)"),
         UniqueConstraint("id", "image_id"),
+        # 同樣的規則。score 與 segmentation 可為 NULL，而 Postgres 預設把 NULL
+        # 視為互不相同——正好會放過最容易重複的那種列（沒有分數也沒有遮罩的
+        # 框），所以要 postgresql_nulls_not_distinct。
+        UniqueConstraint(
+            "annotation_batch_id", "image_id", "category_id", "annotator_id",
+            "score", "bbox", "segmentation", "iscrowd",
+            postgresql_nulls_not_distinct=True,
+        ),
         Index("idx_det_annotations_batch", "annotation_batch_id"),
         Index("idx_det_annotations_image", "image_id"),
         Index("idx_det_annotations_category", "category_id"),

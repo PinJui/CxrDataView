@@ -210,8 +210,7 @@ image, and a bidirectional FK is not expressible: targets must be unique
 "not yet labelled"; a manual-set is training-ready, so every image must carry an
 annotation. A deferred constraint trigger enforces it (deferred because a build
 writes images before annotations), `build()` checks first so the error names the
-count and the fix, and `filter criterion=annotated` drops them explicitly so the
-removal stays visible in the spec.
+count and the fix, and `filter criterion=annotated` drops them explicitly.
 
 **Sourcing images brings their annotations.** `source --image` and `import_list`
 pull every annotation on the images they bring in, disagreements included; those
@@ -274,6 +273,7 @@ outside the transaction is the spec object, written first on purpose.
 | No annotation ships without a label name | `_assert_annotations_are_mapped()` before any write |
 | Unresolvable conflicts stop the build | `strict=True` on the compiled `conflict_resolve` |
 | POS + NEG + UNKNOWN equals the image count | One cls row per (image, category); `verify.sql` check 14 |
+| A batch never holds the same annotation twice | `UNIQUE` on both annotation tables, `NULLS NOT DISTINCT` for det |
 | A spec.yaml cannot be swapped unnoticed | `spec_sha256` on the version, re-checked on every read |
 
 `scripts/verify.sql` re-checks these in SQL, bypassing the Python so a bug in
@@ -281,7 +281,7 @@ outside the transaction is the spec object, written first on purpose.
 everything from scratch and runs 50 end-to-end checks.
 
 ## 8. Testing
-176 tests against real PostgreSQL, not SQLite: the deferred triggers, composite
+178 tests against real PostgreSQL, not SQLite: the deferred triggers, composite
 FKs, `ARRAY` and `JSONB` do not exist there, so SQLite would test nothing real.
 
 | File | Covers |
@@ -306,13 +306,13 @@ printing it, so output paths are now exercised as output paths.
   `save` writes it to a file (a temp path if unnamed), `load` resumes it.
 - In `preview`, POS + NEG can exceed the image count before `conflict_resolve`
   (two sources calling one image positive and negative); `cxr show` cannot.
-- `resolve manual` (pick a winning annotation) and `manual_override` (name an
-  id) are easy to confuse; nothing shows a film either, see `TODO.md`.
-- Export produces COCO and a CSV manifest; there is no YOLO writer.
+- `resolve manual` (pick an annotation) and `manual_override` (name an id) are
+  easy to confuse; nothing shows a film either, see `TODO.md`.
+- Export produces COCO and a CSV manifest; no YOLO writer.
 - `scripts/tools/` holds the migration utilities (parquet import, blake3
-  backfill, lineage) and needs pandas/pyarrow; the runtime does not.
-- A version spans two stores and nothing enforces that spec.yaml still exists
-  or matches: `spec_sha256` detects drift, but no `cxr fsck` sweeps for it.
+  backfill, lineage); they need pandas/pyarrow, the runtime does not.
+- A version spans two stores and nothing enforces that spec.yaml still exists or
+  matches: `spec_sha256` detects drift, but no `cxr fsck` sweeps for it.
 - Largest tested scale is ~1,000 images and `Catalog` holds every batch it
   touches in memory; the tool runs beside the database, so latency and memory
   have not been treated as constraints.

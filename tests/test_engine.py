@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from cxr_dataset_manager.core.engine import Author, build, execute_spec
 from cxr_dataset_manager.core.schema import BuildSpec
@@ -689,3 +690,71 @@ def test_a_zero_score_annotation_is_a_negative_not_a_positive(db, spec):
     finally:
         db.rollback()
         _cleanup(db, name)
+
+
+# ---------------------------------------------------------------------------
+# 一個 batch 裡不該有重複的標註
+# ---------------------------------------------------------------------------
+
+
+def test_a_batch_refuses_a_duplicate_cls_annotation(db):
+    """同一張影像、同一個 category、同一個標註者、同一個分數 = 同一筆主張。
+
+    存兩次不帶任何資訊，只是佔空間，而且會讓所有以標註數為分母的統計失真。
+    """
+    row = db.execute(
+        text(
+            "SELECT annotation_batch_id, image_id, category_id, annotator_id, score"
+            " FROM cls_annotations LIMIT 1"
+        )
+    ).mappings().one()
+    with pytest.raises(IntegrityError):
+        db.execute(
+            text(
+                "INSERT INTO cls_annotations"
+                " (annotation_batch_id, image_id, category_id, annotator_id, score)"
+                " VALUES (:annotation_batch_id, :image_id, :category_id,"
+                "         :annotator_id, :score)"
+            ),
+            dict(row),
+        )
+    db.rollback()
+
+
+def test_a_duplicate_det_box_is_caught_even_when_its_score_is_null(db):
+    """回歸測試：Postgres 預設把 NULL 視為互不相同。
+
+    det 的 score 與 segmentation 都可為 NULL，照預設語意，最容易重複的那種列
+    （沒有分數也沒有遮罩的框）反而會整批溜過約束——mock data 裡 76 筆 det 的
+    segmentation 全是 NULL，也就是一筆都擋不到。約束要寫 NULLS NOT DISTINCT。
+    """
+    row = db.execute(
+        text(
+            """
+            SELECT annotation_batch_id, image_id, category_id, annotator_id,
+                   bbox, iscrowd
+            FROM det_annotations WHERE segmentation IS NULL LIMIT 1
+            """
+        )
+    ).mappings().one()
+    params = dict(row) | {"score": None, "segmentation": None}
+    db.execute(
+        text(
+            "UPDATE det_annotations SET score = NULL"
+            " WHERE annotation_batch_id = :annotation_batch_id"
+            "   AND image_id = :image_id AND category_id = :category_id"
+        ),
+        {k: params[k] for k in ("annotation_batch_id", "image_id", "category_id")},
+    )
+    with pytest.raises(IntegrityError):
+        db.execute(
+            text(
+                "INSERT INTO det_annotations"
+                " (annotation_batch_id, image_id, category_id, annotator_id,"
+                "  bbox, segmentation, iscrowd, score)"
+                " VALUES (:annotation_batch_id, :image_id, :category_id,"
+                "         :annotator_id, :bbox, :segmentation, :iscrowd, :score)"
+            ),
+            params,
+        )
+    db.rollback()

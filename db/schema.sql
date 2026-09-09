@@ -147,7 +147,10 @@ CREATE TABLE cls_annotations (
     annotator_id         BIGINT NOT NULL REFERENCES annotators(id) ON DELETE RESTRICT,
     FOREIGN KEY (annotation_batch_id, category_id)
         REFERENCES categories (annotation_batch_id, id) ON DELETE CASCADE,
-    UNIQUE (id, image_id)
+    UNIQUE (id, image_id),
+    -- One batch should not carry the same claim twice. Every column here is
+    -- NOT NULL, so ordinary UNIQUE semantics are enough.
+    UNIQUE (annotation_batch_id, image_id, category_id, annotator_id, score)
 );
 
 CREATE INDEX idx_cls_annotations_batch ON cls_annotations (annotation_batch_id);
@@ -170,7 +173,18 @@ CREATE TABLE det_annotations (
     annotator_id         BIGINT NOT NULL REFERENCES annotators(id) ON DELETE RESTRICT,
     FOREIGN KEY (annotation_batch_id, category_id)
         REFERENCES categories (annotation_batch_id, id) ON DELETE CASCADE,
-    UNIQUE (id, image_id)
+    UNIQUE (id, image_id),
+    -- Same rule, but score and segmentation are nullable and PostgreSQL treats
+    -- NULLs as distinct by default — which would exempt exactly the rows most
+    -- likely to be duplicated (a box with no score and no mask). NULLS NOT
+    -- DISTINCT (PostgreSQL 15+) makes two such rows collide as intended.
+    --
+    -- segmentation is in the key, so a mask large enough to push the index
+    -- entry past the btree limit (~2700 bytes) will be rejected on INSERT.
+    -- Nothing in the current data comes close; detailed polygons would.
+    UNIQUE NULLS NOT DISTINCT
+        (annotation_batch_id, image_id, category_id, annotator_id, score,
+         bbox, segmentation, iscrowd)
 );
 
 CREATE INDEX idx_det_annotations_batch ON det_annotations (annotation_batch_id);

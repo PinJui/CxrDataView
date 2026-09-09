@@ -135,6 +135,21 @@ checks(seq, 檢查項目, 問題數) AS (
     WHERE d.labelled > (SELECT count(*) FROM manual_set_images x
                          WHERE x.manual_set_version_id = d.vid))
 
+  -- 一個 batch 裡不該有重複的標註條目。schema 的 UNIQUE 擋的是新寫入，
+  -- 這裡是對既有資料重算一次——約束是後來加的，舊資料可能早就髒了
+  UNION ALL SELECT 15, '同一 batch 內重複的 cls 標註', (
+    SELECT coalesce(sum(n - 1), 0) FROM (
+      SELECT count(*) AS n FROM cls_annotations
+      GROUP BY annotation_batch_id, image_id, category_id, annotator_id, score
+      HAVING count(*) > 1) d)
+
+  UNION ALL SELECT 16, '同一 batch 內重複的 det 標註', (
+    SELECT coalesce(sum(n - 1), 0) FROM (
+      SELECT count(*) AS n FROM det_annotations
+      GROUP BY annotation_batch_id, image_id, category_id, annotator_id, score,
+               bbox, segmentation, iscrowd
+      HAVING count(*) > 1) d)
+
   -- 溯源不再有任何獨立的表：spec 本體在物件儲存，逐步紀錄靠重跑 spec 得出
   UNION ALL SELECT 13, '不該存在的溯源表', (
     SELECT count(*) FROM information_schema.tables

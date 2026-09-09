@@ -90,7 +90,7 @@ prints every step's counts and warnings without writing.
 
 ## Verifying
 ```bash
-python -m pytest tests/ -q                        # 176 tests
+python -m pytest tests/ -q                        # 178 tests
 psql -h localhost -p 5433 -U postgres -d cxr -f scripts/verify.sql
 ./scripts/acceptance.sh                           # rebuilds and checks everything
 ```
