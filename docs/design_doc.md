@@ -1,8 +1,7 @@
 # Design
 
-The architecture and how the code is divided. Sections 1–3 are the design brief
-(what a spec means, why the layers exist); 4 onwards record what was actually
-built and where it departs from the brief.
+The architecture and how the code is divided. Sections 1–3 are the design brief;
+4 onwards record what was built and where it departs from it.
 
 ## 1. Principles
 1. **The database stores results, never mutable business rules.** Dedup,
@@ -184,9 +183,9 @@ leaves an unreferenced file, the reverse would leave an unreproducible version.
 
 **A spec has exactly three operations: save, view, load.** Save writes the file
 directly (`cxr spec ref -o`, or `save` in the REPL), view renders it for a human
-(`cxr spec ref`, wrapped, never cropped), load reads one back (`cxr build`, or
-`load`). Redirecting output into a file is not one of them: stdout is a display
-channel, and treating it as a data channel silently truncated a spec once.
+(wrapped, never cropped), load reads one back (`cxr build`, or `load`).
+Redirecting output into a file is not one of them: stdout is a display channel,
+and treating it as a data channel silently truncated a spec once.
 
 **Conflicts are grouped by image, not by (image, target_category).** Grouped the
 latter way the conflict that matters most is invisible: when source A says
@@ -228,10 +227,10 @@ last `category_map` to `require_total=True` and the last `conflict_resolve` to
 record; how it was built is a pure function of (spec, data), so `cxr why` re-runs
 the spec and watches the entity's membership change step by step. Two tables were
 tried and removed for the same reason: per-entity rulings outnumbered the
-datasets themselves and 86% restated the spec mechanically, while per-step
-results duplicated it in two columns and carried statistics nothing read. Both
-froze whatever `ops.py` concluded at build time, drifting from the rules as soon
-as those changed. The cost is one build per `cxr why`, plus an intact spec.yaml.
+datasets and 86% restated the spec mechanically, while per-step results
+duplicated it in two columns and carried statistics nothing read. Both froze what
+`ops.py` concluded at build time, drifting from the rules as those changed. The
+cost is one build per `cxr why`, plus an intact spec.yaml.
 
 **`manual_override` names an id; everything else is a rule.** `filter`, `dedup`
 and the conflict rules state a criterion and apply it everywhere.
@@ -279,12 +278,11 @@ outside the transaction is the spec object, written first on purpose.
 
 `scripts/verify.sql` re-checks these in SQL, bypassing the Python so a bug in
 `ops.py` cannot make its own verification pass; `scripts/acceptance.sh` rebuilds
-everything from scratch and runs 48 end-to-end checks.
+everything from scratch and runs 50 end-to-end checks.
 
 ## 8. Testing
-176 tests against a real PostgreSQL instance, not SQLite: the deferred triggers,
-composite foreign keys, `ARRAY` and `JSONB` are PostgreSQL-specific, and SQLite
-would test constraints that do not exist.
+176 tests against real PostgreSQL, not SQLite: the deferred triggers, composite
+FKs, `ARRAY` and `JSONB` do not exist there, so SQLite would test nothing real.
 
 | File | Covers |
 |---|---|
@@ -305,22 +303,18 @@ text on the way to a file — so output paths are now tested as output paths.
 
 ## 9. Known limitations
 - Exploration state lives in the process; leaving `cxr explore` discards it.
-  `save` writes the spec to a file (a temp path if unnamed), `load` resumes it.
+  `save` writes it to a file (a temp path if unnamed), `load` resumes it.
 - In `preview`, POS + NEG can exceed the image count before `conflict_resolve`
   (two sources calling one image positive and negative); `cxr show` cannot.
-- Choosing which annotation survives a conflict is `resolve manual`, not
-  `manual_override` — the two are easy to confuse.
+- `resolve manual` (pick a winning annotation) and `manual_override` (name an
+  id) are easy to confuse; nothing shows a film either, see `TODO.md`.
 - Export produces COCO and a CSV manifest; there is no YOLO writer.
-- `scripts/tools/` holds the migration utilities — parquet import, blake3
-  backfill, lineage building — needing pandas/pyarrow; the runtime does not.
-- `cxr image` shows everything recorded about one image — annotations, lineage,
-  duplicates, which datasets use it — but not the film. See `TODO.md`.
-- A version spans two stores and nothing enforces that spec.yaml still exists or
-  matches: `spec_sha256` detects drift but cannot prevent it, and no `cxr fsck`
-  sweeps every version.
-- Largest tested scale is ~1,000 images; `Catalog` holds every batch it touches
-  in memory. The tool runs on the server beside the database, so latency and
-  memory have not been treated as constraints.
+- `scripts/tools/` holds the migration utilities (parquet import, blake3
+  backfill, lineage) and needs pandas/pyarrow; the runtime does not.
+- A version spans two stores and nothing enforces that spec.yaml still exists
+  or matches: `spec_sha256` detects drift, but no `cxr fsck` sweeps for it.
+- Largest tested scale is ~1,000 images and `Catalog` holds every batch it
+  touches in memory; the tool runs beside the database, so latency and memory
+  have not been treated as constraints.
 - No access control: anyone who can reach the database can build and read every
-  dataset. Deliberate for an internal tool — the builder's name and email are
-  attribution, not authentication.
+  dataset. Deliberate for an internal tool — name and email are attribution.

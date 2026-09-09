@@ -17,7 +17,6 @@ into a local cache first.
 
 Found while walking through `cxr explore` as a user. All fixed; kept here as a
 record of what the interface got wrong.
-
 1. **Tab completion did nothing at all.** (fixed)
    Two separate faults. readline's default word delimiters include `@` and `-`,
    so `source aws@V<Tab>` matched nothing and `source TB-<Tab>` broke on the
@@ -40,7 +39,7 @@ record of what the interface got wrong.
    the surviving image row is not offered — the composite foreign keys require
    an annotation to travel with its own image.
 
-8. **A manual-set could contain unannotated images.** (fixed)
+3. **A manual-set could contain unannotated images.** (fixed)
    The original schema said on `manual_set_images` that "an image with no
    annotation may still be selected", and its composite foreign keys only
    constrain the other direction (selecting an annotation requires its image).
@@ -52,7 +51,7 @@ record of what the interface got wrong.
    exist on the images they bring in. **This is a deliberate departure from the
    original SQL**; the file it came from is kept in `legacy/db-before-merge/`.
 
-3. **`manual_override` only half worked, and half of it was invisible.** (fixed)
+4. **`manual_override` only half worked, and half of it was invisible.** (fixed)
    The concept is simple — name an id, include or exclude it — but three things
    got in the way. Naming an annotation from a batch the spec had not sourced
    failed, because `Catalog` had no way to load one by id (`ensure_images` had
@@ -68,14 +67,14 @@ record of what the interface got wrong.
    on the manual conflict rule went too: an annotation id already determines
    its image, and a redundant field is one that eventually disagrees.
 
-4. **No way to settle a conflict by hand.** (fixed)
+5. **No way to settle a conflict by hand.** (fixed)
    The `manual` conflict rule existed in the spec and the ops, and the session
    exposed it, but the REPL never wired it up — and `conflicts` did not print
    annotation ids, so there was nothing to point at. Both fixed:
    `conflicts` shows ids, `resolve manual <image> <annotation_id> ["reason"]`
    applies them.
 
-5. **`undo` deleted the wrong step, once branches existed.** (fixed)
+6. **`undo` deleted the wrong step, once branches existed.** (fixed)
    It removed the last entry in the step list, which was fine while the head
    was always the last step — but `checkout` broke that assumption, so standing
    on `source_1` and typing `undo` silently deleted `source_2` on another
@@ -84,7 +83,7 @@ record of what the interface got wrong.
    head as well as the length, so `rollback` puts you back where you were
    standing rather than at the end of the list.
 
-6. **No way to move between branches.** (fixed)
+7. **No way to move between branches.** (fixed)
    Every `source` and `import` opens a branch and makes it current, but nothing
    could switch back, so a branch could only be extended while it happened to
    be the head. Added `checkout <step_id>`. `steps` now distinguishes two
@@ -92,10 +91,21 @@ record of what the interface got wrong.
    and `末端` marks a branch tip nothing has consumed yet — the tips are what
    `union` collects and what `commit` merges automatically.
 
-7. **`source --image` left the images unlabelled.** (fixed)
+8. **`source --image` left the images unlabelled.** (fixed)
    Sourcing an image batch pulled no annotations, so the obvious first command
    produced a dataset with no labels. It now pulls the annotations that exist
    on those images and reports which batches they came from; `--no-annotations`
    opts out. (Annotation-free manual-sets are legal and do commit — the schema
    allows an image to be "not yet labelled" — it was simply never what the user
    wanted from this command.)
+
+9. **Saving a spec silently dropped text.** (fixed)
+   `cxr spec x@V1 > x.yaml` was the documented way to keep a spec, but the
+   command only *printed* — the shell's redirect made the file, so the data went
+   out through Rich, whose `Syntax` crops at the console width instead of
+   wrapping. Without a tty the width is 80, CJK takes two cells each, and the
+   saved file lost a whole clause without any error. Fixed twice over: a spec
+   now has exactly three operations — save (`-o`, or `save` in the REPL) writes
+   the file directly, view renders it wrapped so nothing vanishes on screen
+   either, and load reads one back. Redirecting a command's output into a file
+   is no longer a supported path; stdout is a display channel.
