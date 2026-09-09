@@ -119,6 +119,22 @@ checks(seq, 檢查項目, 問題數) AS (
     SELECT count(*) FROM manual_set_versions
     WHERE created_by_name = '' OR created_by_email NOT LIKE '%@%')
 
+  -- category distribution 的三欄（POS/NEG/UNKNOWN）互斥且窮盡，所以每個
+  -- (版本, target) 的 POS + NEG 不可能超過該版本的影像數
+  UNION ALL SELECT 14, 'cls 正負例加起來超過影像總數', (
+    SELECT count(*) FROM (
+      SELECT msa.manual_set_version_id AS vid, cm.target_category_id AS tcid,
+             count(DISTINCT msa.image_id) AS labelled
+      FROM manual_set_cls_annotations msa
+      JOIN cls_annotations a ON a.id = msa.cls_annotation_id
+      JOIN manual_set_category_mappings cm
+        ON cm.manual_set_version_id = msa.manual_set_version_id
+       AND cm.category_id = a.category_id
+      GROUP BY 1, 2
+    ) d
+    WHERE d.labelled > (SELECT count(*) FROM manual_set_images x
+                         WHERE x.manual_set_version_id = d.vid))
+
   -- 溯源不再有任何獨立的表：spec 本體在物件儲存，逐步紀錄靠重跑 spec 得出
   UNION ALL SELECT 13, '不該存在的溯源表', (
     SELECT count(*) FROM information_schema.tables

@@ -122,6 +122,10 @@ def test_show(built):
     output = ok("show", f"{built['name']}@V1")
     assert "影像" in output and "病患數" in output
     assert "來源組成" in output and "Target category" in output
+    # 每個 target category 的正／負／未知分布
+    assert "Category distribution" in output
+    for column in ("CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"):
+        assert column in output, column
 
 
 def test_spec_prints_runnable_yaml(built, tmp_path):

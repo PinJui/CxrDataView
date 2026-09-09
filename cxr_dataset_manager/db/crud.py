@@ -356,6 +356,57 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
         {"vid": version_id},
     ).mappings().all()
 
+    category_distribution = db.execute(
+        text(
+            """
+            -- 每個 target category 一列：這個版本對這個標籤各知道多少。
+            -- cls 數的是「影像」，det 數的是「框」——一張片可以有好幾個框，
+            -- 但同一張片對同一個 category 只會有一筆 cls（conflict_resolve
+            -- 之後的不變式，verify.sql 第 3 項在守）。所以 cls 三欄相加
+            -- 必定等於這個版本的影像總數。
+            WITH cls AS (
+                SELECT cm.target_category_id AS tcid,
+                       count(DISTINCT msa.image_id) FILTER (WHERE a.score > 0) AS pos,
+                       count(DISTINCT msa.image_id) FILTER (WHERE a.score = 0) AS neg,
+                       count(DISTINCT msa.image_id) AS any_
+                FROM manual_set_cls_annotations msa
+                JOIN cls_annotations a ON a.id = msa.cls_annotation_id
+                JOIN manual_set_category_mappings cm
+                  ON cm.manual_set_version_id = msa.manual_set_version_id
+                 AND cm.category_id = a.category_id
+                WHERE msa.manual_set_version_id = :vid
+                GROUP BY 1
+            ),
+            det AS (
+                SELECT cm.target_category_id AS tcid,
+                       count(*) FILTER (WHERE d.score > 0) AS pos,
+                       count(*) FILTER (WHERE d.score IS NULL) AS no_score,
+                       count(*) AS all_
+                FROM manual_set_det_annotations msd
+                JOIN det_annotations d ON d.id = msd.det_annotation_id
+                JOIN manual_set_category_mappings cm
+                  ON cm.manual_set_version_id = msd.manual_set_version_id
+                 AND cm.category_id = d.category_id
+                WHERE msd.manual_set_version_id = :vid
+                GROUP BY 1
+            )
+            SELECT tc.name AS target,
+                   coalesce(cls.pos, 0) AS cls_pos,
+                   coalesce(cls.neg, 0) AS cls_neg,
+                   :total - coalesce(cls.any_, 0) AS cls_unknown,
+                   coalesce(det.pos, 0) AS det_pos,
+                   coalesce(det.no_score, 0) AS det_no_score,
+                   coalesce(det.all_, 0) AS det_all
+            FROM manual_set_target_categories tc
+            LEFT JOIN cls ON cls.tcid = tc.id
+            LEFT JOIN det ON det.tcid = tc.id
+            WHERE tc.manual_set_version_id = :vid
+            ORDER BY tc.name
+            """
+        ),
+        {"vid": version_id, "total": counts["images"]},
+    ).mappings().all()
+
     grouped_mappings: dict[str, list[str]] = {}
     for row in mappings:
         grouped_mappings.setdefault(row["target"], []).append(row["local"])
@@ -369,6 +420,7 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
         "by_target_category": {r["target"]: r["n"] for r in by_target},
         "subjects": dict(subjects),
         "category_mappings": grouped_mappings,
+        "category_distribution": [dict(r) for r in category_distribution],
         "created_by": f"{head['created_by_name']} <{head['created_by_email']}>",
         "spec_yaml": spec["yaml"],
         "spec_key": spec["key"],

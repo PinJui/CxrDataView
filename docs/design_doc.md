@@ -43,9 +43,9 @@ derivation recorded so it can be reproduced; and how does someone build it by
 trial and error, since nobody writes a correct spec first try.
 
 Dependencies run inward, `cli/` → `session/` → `core/` → `db/`, with
-`settings.py` and `storage.py` as leaves importing nothing above them. The
-exception is `db/crud.py` reaching back into `core` to parse and re-run a spec
-for `cxr why` — that read path is arguably a service layer that does not exist.
+`settings.py` and `storage.py` as leaves importing nothing above them; the
+exception is `db/crud.py` reaching back into `core` to re-run a spec for
+`cxr why`, a read path that is arguably a missing service layer.
 
 ## 3. Spec language
 A spec is a list of steps with dependencies — mostly linear, occasionally
@@ -74,6 +74,8 @@ later steps refer to it in `input` and how `cxr why` reports the step.
   `date_captured`, `subject_id`, …) *and* its annotations as they stand in the
   current set (`labels`, `targets`, `annotators`, `n_annotations`), so
   `'Pneumonia' in labels` works and shifts as earlier steps map or resolve.
+  `core/predicate.py` walks the Python AST against a node whitelist rather than
+  evaluating it — a spec is data, never code.
 - **`balance`** — cap every class at `max_per_class`. Multi-label makes "exactly
   N of each" unsatisfiable since one image fills two quotas, so quotas fill
   rarest class first, preferring images already chosen: rare classes take their
@@ -115,8 +117,11 @@ Runnable examples live in `specs/`; `pneumonia_train.yaml` and
 mirrors these ops plus `preview`, `checkpoint`, `rollback`, `undo`, `checkout`,
 `compile`, `commit`. `undo` removes the step the head is on; `rollback` returns
 to a checkpoint, restoring the step list and where the head stood. `preview()`
-returns statistics — counts, distributions, the diff against the previous step,
-unmapped categories, images lacking subject information — never a dump of rows.
+returns statistics — counts, the diff against the previous step, unmapped
+categories, images lacking subject information, and a per-target distribution
+(CLS POS / NEG / UNKNOWN in images, DET POS in boxes) — never a dump of rows.
+`cxr show` reports the same distribution from SQL; the two implementations are
+independent, so a test asserts they agree row for row.
 
 ## 4. Module responsibilities
 | Module | Owns | Explicitly does not |
@@ -193,21 +198,21 @@ discards duplicate images *and* their annotations, so which copy survives is the
 user's call: `duplicates` lists every group with each copy's id, source, subject
 and labels, and `keep: [id, ...]` pins the winners. Unpinned groups fall back to
 `prefer_annotated` — identical `blake3` is the same picture, so keeping the
-unannotated copy discards labels for nothing — then to source priority. Moving
-an annotation onto the survivor is not offered; a composite FK ties it to its
-own image, and a bidirectional FK is not expressible anyway: targets must be
-unique (forbidding multi-label) and name one table, not "cls or det".
+unannotated copy discards labels for nothing — then to source priority. Moving an
+annotation onto the survivor is not offered; a composite FK ties it to its own
+image, and a bidirectional FK is not expressible: targets must be unique
+(forbidding multi-label) and name one table, not "cls or det".
 
-**A manual-set may not contain unannotated images.** An original-set image may
-be "not yet labelled"; a manual-set is training-ready, so every image must carry
-an annotation. A deferred constraint trigger enforces this — deferred because a
-build writes images before annotations — and `build()` checks first so the error
-reports the count and the fix. `filter criterion=annotated` drops them
-explicitly, keeping the removal visible in the spec.
+**A manual-set may not contain unannotated images.** An original-set image may be
+"not yet labelled"; a manual-set is training-ready, so every image must carry an
+annotation. A deferred constraint trigger enforces it (deferred because a build
+writes images before annotations), `build()` checks first so the error names the
+count and the fix, and `filter criterion=annotated` drops them explicitly so the
+removal stays visible in the spec.
 
 **Sourcing images brings their annotations.** `source --image` and `import_list`
-pull every annotation on the images they bring in, disagreements included —
-`conflict_resolve` settles those, not a silent choice at load time.
+pull every annotation on the images they bring in, disagreements included; those
+are `conflict_resolve`'s job, not a silent choice at load time.
 
 **Exploration is permissive, the compiled spec is strict.** `map_category` maps
 one batch at a time, so it must *not* drop annotations not yet mapped, or the
@@ -216,14 +221,13 @@ last `category_map` to `require_total=True` and the last `conflict_resolve` to
 `strict=True`. Rules that cannot decide fail and name the cases.
 
 **Provenance is recomputed, not stored.** A version and its spec are the entire
-record; how it was built is a pure function of (spec, data), so `cxr why`
-re-runs the spec and watches the entity's membership change step by step. Two
-tables were tried and removed for the same reason: per-entity rulings
-outnumbered the datasets themselves and 86% restated the spec mechanically,
-while per-step results duplicated it in two columns and carried statistics
-nothing read. Both froze whatever `ops.py` concluded at build time, drifting
-from the rules as soon as those changed. The cost is one build per `cxr why`,
-and it needs the spec.yaml still there and intact.
+record; how it was built is a pure function of (spec, data), so `cxr why` re-runs
+the spec and watches the entity's membership change step by step. Two tables were
+tried and removed for the same reason: per-entity rulings outnumbered the
+datasets themselves and 86% restated the spec mechanically, while per-step
+results duplicated it in two columns and carried statistics nothing read. Both
+froze whatever `ops.py` concluded at build time, drifting from the rules as soon
+as those changed. The cost is one build per `cxr why`, plus an intact spec.yaml.
 
 **`manual_override` names an id; everything else is a rule.** `filter`, `dedup`
 and the conflict rules state a criterion and apply it everywhere.
@@ -232,27 +236,23 @@ is unusable, a patient withdrew consent, one label is wrong — and naming ids i
 the spec makes that reproducible and auditable instead of an untraceable
 hand-edit, with the `reason` travelling into `cxr why`. Everything is addressed
 by id, images included: file names are unique only within a batch, so a
-`set/version/name` path must be parsed and resolved, and can resolve to the
-wrong row. Including an image brings its annotations, mirroring `source
---image`. None of the four actions can silently do nothing — a no-op reporting
-success is worse than a failure.
-
-**`filter` expressions are parsed, not evaluated.** `core/predicate.py` walks
-the Python AST against a node whitelist — a spec is data, never code.
+`set/version/name` path must be parsed and resolved, and can resolve to the wrong
+row. Including an image brings its annotations, mirroring `source --image`. None
+of the four actions can silently do nothing — a no-op reporting success is worse
+than a failure.
 
 **Deletion is the one exception to immutability.** `cxr rm` exists because a
-mistaken build otherwise strands a version number forever. It prints what will
-be lost, refuses to run unattended without `--yes`, and tells you to save the
-spec first. Source data is never touched: CASCADE removes the membership rows,
+mistaken build otherwise strands a version number forever. It prints what will be
+lost, refuses to run unattended without `--yes`, and tells you to save the spec
+first. Source data is never touched: CASCADE removes the membership rows,
 `ON DELETE RESTRICT` keeps the originals. The spec.yaml goes after the
-transaction succeeds — an orphan object is litter, a version without its spec
-is unreproducible.
+transaction succeeds — an orphan object is litter, a missing spec is worse.
 
 **Version conflicts are resolved optimistically.** The pre-flight check exists
 only for a friendly message; the real guarantee is `UNIQUE (manual_set_id,
 version)`. When two people commit the same version at once, one hits the
 constraint and the error names who won — no locks, nothing blocks. That row also
-records who built it: `created_by_name` / `created_by_email` are plain columns,
+records the builder: `created_by_name` / `created_by_email` are plain columns,
 not a reference to `annotators`, which records who *labelled*.
 
 **A build is one transaction, and failure leaves no version.** Any failing step
@@ -270,6 +270,7 @@ outside the transaction is the spec object, written first on purpose.
 | The same spec yields the same set | Seeded hashing, sorted iteration, priority-then-id tie-breaks |
 | No annotation ships without a label name | `_assert_annotations_are_mapped()` before any write |
 | Unresolvable conflicts stop the build | `strict=True` on the compiled `conflict_resolve` |
+| POS + NEG + UNKNOWN equals the image count | One cls row per (image, category); `verify.sql` check 14 |
 | A spec.yaml cannot be swapped unnoticed | `spec_sha256` on the version, re-checked on every read |
 
 `scripts/verify.sql` re-checks these in SQL, bypassing the Python so a bug in
@@ -277,7 +278,7 @@ outside the transaction is the spec object, written first on purpose.
 everything from scratch and runs 48 end-to-end checks.
 
 ## 8. Testing
-173 tests against a real PostgreSQL instance, not SQLite: the deferred triggers,
+176 tests against a real PostgreSQL instance, not SQLite: the deferred triggers,
 composite foreign keys, `ARRAY` and `JSONB` are PostgreSQL-specific, and SQLite
 would test constraints that do not exist.
 
@@ -293,15 +294,17 @@ would test constraints that do not exist.
 | `test_import_lists.py` | Long file-name lists: storage, refs, the round trip |
 
 `test_cli.py` exists because `cxr show` was once guaranteed to crash on a
-mistyped dict key while being documented and recommended — unit tests covered
-the query, not the line printing it. The gap recurred twice in output code: Tab
-completion was tested by calling the completer while the key was never bound,
-and `cxr spec > file.yaml` dropped text because Rich crops rather than wraps
-without a tty. Both are now tested through the output path itself.
+mistyped dict key while being documented and recommended: unit tests covered the
+query, not the line printing it. The same gap recurred twice — Tab completion
+tested by calling the completer while the key was never bound, and
+`cxr spec > file.yaml` dropping text because Rich crops rather than wraps without
+a tty — so both are now tested through the output path itself.
 
 ## 9. Known limitations
 - Exploration state lives in the process; leaving `cxr explore` discards it.
   `save` writes the spec to a file (a temp path if unnamed), `load` resumes it.
+- In `preview`, POS + NEG can exceed the image count before `conflict_resolve`
+  (two sources calling one image positive and negative); `cxr show` cannot.
 - Choosing which annotation survives a conflict is `resolve manual`, not
   `manual_override` — the two are easy to confuse.
 - Export produces COCO and a CSV manifest; there is no YOLO writer.

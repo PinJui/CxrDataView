@@ -90,7 +90,7 @@ even with ten thousand file names — `import` and `pick` do this for you. Prefe
 
 ## Verifying
 ```bash
-python -m pytest tests/ -q                        # 173 tests
+python -m pytest tests/ -q                        # 176 tests
 psql -h localhost -p 5433 -U postgres -d cxr -f scripts/verify.sql
 ./scripts/acceptance.sh                           # rebuilds and checks everything
 ```

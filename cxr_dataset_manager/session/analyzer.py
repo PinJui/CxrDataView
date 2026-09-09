@@ -24,6 +24,60 @@ def _date_range(catalog: Catalog, image_ids: set[int]) -> dict[str, Any]:
     }
 
 
+def _category_distribution(
+    catalog: Catalog, cand: CandidateSet
+) -> list[dict[str, Any]]:
+    """每個 target category 的正／負／未知分布，鍵名與 crud.version_summary 相同。
+
+    cls 數影像、det 數框，跟 `cxr show` 是同一套定義，兩邊看到的數字才對得起來。
+
+    探索中的一個差異：`conflict_resolve` 之前，同一張影像可能同時被 A 說成
+    陽性、被 B 說成陰性，所以 POS + NEG 可能超過影像總數，UNKNOWN 也會因此
+    被壓成 0。這是真實狀態，不是錯誤——衝突還沒收斂而已。
+    """
+    pos: dict[str, set[int]] = {}
+    neg: dict[str, set[int]] = {}
+    seen: dict[str, set[int]] = {}
+    det_pos: Counter[str] = Counter()
+    det_no_score: Counter[str] = Counter()
+    det_all: Counter[str] = Counter()
+
+    for ann_id in cand.cls:
+        ann = catalog.cls(ann_id)
+        target = cand.category_targets.get(ann.category_id)
+        if not target:  # 還沒映射的不進這張表，category_report 會單獨報
+            continue
+        seen.setdefault(target, set()).add(ann.image_id)
+        bucket = pos if (ann.score or 0) > 0 else neg
+        bucket.setdefault(target, set()).add(ann.image_id)
+
+    for ann_id in cand.det:
+        ann = catalog.det(ann_id)
+        target = cand.category_targets.get(ann.category_id)
+        if not target:
+            continue
+        det_all[target] += 1
+        if ann.score is None:
+            det_no_score[target] += 1
+        elif ann.score > 0:
+            det_pos[target] += 1
+
+    total = len(cand.images)
+    targets = set(seen) | set(det_all) | set(cand.category_targets.values())
+    return [
+        {
+            "target": t,
+            "cls_pos": len(pos.get(t, ())),
+            "cls_neg": len(neg.get(t, ())),
+            "cls_unknown": max(0, total - len(seen.get(t, ()))),
+            "det_pos": det_pos[t],
+            "det_no_score": det_no_score[t],
+            "det_all": det_all[t],
+        }
+        for t in sorted(targets)
+    ]
+
+
 def summarize(
     catalog: Catalog,
     cand: CandidateSet,
@@ -92,6 +146,7 @@ def summarize(
             "images_with_annotation": len(annotated_images),
             "images_without_annotation": len(images - annotated_images),
         },
+        "category_distribution": _category_distribution(catalog, cand),
         "categories": {
             "local_present": len(local_categories_in(catalog, cand)),
             "mapped_targets": sorted(target_counts),

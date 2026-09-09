@@ -606,3 +606,86 @@ def test_an_imported_version_has_no_spec_and_says_so(db):
         )
     finally:
         _cleanup(db, name)
+
+
+# ---------------------------------------------------------------------------
+# category distribution：每個 target 的正／負／未知
+# ---------------------------------------------------------------------------
+
+
+def test_category_distribution_counts_images_for_cls_and_boxes_for_det(db, spec):
+    """cls 數影像、det 數框——兩者單位不同，不可以互相加總。
+
+    cls 的三欄互斥且窮盡，所以每一列相加都必須等於這個版本的影像總數；
+    這同時也在驗「同一張影像對同一個 category 只會有一筆 cls」這個不變式。
+    """
+    name = f"pytest_{uuid.uuid4().hex[:8]}"
+    try:
+        version_id = build(db, spec, name, "V1", author=TEST_AUTHOR).manual_set_version_id
+        summary = crud.version_summary(db, version_id)
+        rows = summary["category_distribution"]
+        assert rows, "這份 spec 有 target category，表格不該是空的"
+
+        for r in rows:
+            assert r["cls_pos"] + r["cls_neg"] + r["cls_unknown"] == summary["images"], r
+
+        # det 是框數：直接跟資料庫對答案，不靠影像去數
+        for r in rows:
+            boxes = db.execute(
+                text(
+                    """
+                    SELECT count(*) FROM manual_set_det_annotations msd
+                    JOIN det_annotations d ON d.id = msd.det_annotation_id
+                    JOIN manual_set_category_mappings cm
+                      ON cm.manual_set_version_id = msd.manual_set_version_id
+                     AND cm.category_id = d.category_id
+                    JOIN manual_set_target_categories tc ON tc.id = cm.target_category_id
+                    WHERE msd.manual_set_version_id = :vid AND tc.name = :t
+                      AND d.score > 0
+                    """
+                ),
+                {"vid": version_id, "t": r["target"]},
+            ).scalar_one()
+            assert r["det_pos"] == boxes, r["target"]
+    finally:
+        _cleanup(db, name)
+
+
+def test_a_zero_score_annotation_is_a_negative_not_a_positive(db, spec):
+    """score = 0 是「看過，判定為陰性」，跟「沒看過」是完全不同的事。
+
+    mock data 目前沒有任何 score = 0 的 cls 標註，所以這一欄只能靠測試造出來。
+    """
+    name = f"pytest_{uuid.uuid4().hex[:8]}"
+    try:
+        version_id = build(db, spec, name, "V1", author=TEST_AUTHOR).manual_set_version_id
+        before = {r["target"]: r for r in crud.version_summary(db, version_id)["category_distribution"]}
+        target = next(t for t, r in before.items() if r["cls_pos"] > 0)
+
+        # 把該 target 底下的一筆標註打成 0 分（測試結束時 rollback 會還原）
+        db.execute(
+            text(
+                """
+                UPDATE cls_annotations SET score = 0 WHERE id = (
+                    SELECT msa.cls_annotation_id
+                    FROM manual_set_cls_annotations msa
+                    JOIN cls_annotations a ON a.id = msa.cls_annotation_id
+                    JOIN manual_set_category_mappings cm
+                      ON cm.manual_set_version_id = msa.manual_set_version_id
+                     AND cm.category_id = a.category_id
+                    JOIN manual_set_target_categories tc ON tc.id = cm.target_category_id
+                    WHERE msa.manual_set_version_id = :vid AND tc.name = :t AND a.score > 0
+                    ORDER BY a.id LIMIT 1)
+                """
+            ),
+            {"vid": version_id, "t": target},
+        )
+
+        after = {r["target"]: r for r in crud.version_summary(db, version_id)["category_distribution"]}
+        assert after[target]["cls_pos"] == before[target]["cls_pos"] - 1
+        assert after[target]["cls_neg"] == before[target]["cls_neg"] + 1
+        # 影像有沒有被看過沒變，所以 UNKNOWN 不該動
+        assert after[target]["cls_unknown"] == before[target]["cls_unknown"]
+    finally:
+        db.rollback()
+        _cleanup(db, name)

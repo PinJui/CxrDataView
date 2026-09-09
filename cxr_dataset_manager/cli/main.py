@@ -73,6 +73,33 @@ def _spec_line(summary: dict) -> str:
     return f"{where}  [yellow]內容與指紋不符[/]"
 
 
+def _print_category_distribution(rows: list[dict], total_images: int) -> None:
+    """每個 target category 在這個版本裡的正/負/未知分布。
+
+    cls 三欄數的是影像且互斥，相加必定等於影像總數；det 數的是框，一張片
+    可以有好幾個，所以跟前三欄不同單位，也不該相加。
+    """
+    if not rows:
+        return
+    console.print(
+        _table(
+            f"Category distribution（cls 以影像計，共 {total_images} 張；det 以框計）",
+            ["target category", "CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"],
+            [
+                [r["target"], r["cls_pos"], r["cls_neg"], r["cls_unknown"], r["det_pos"]]
+                for r in rows
+            ],
+        )
+    )
+    # score 是 NULL 的 det 框既不算 POS 也不算負例，會整個消失在表格外——
+    # 數量不是零就要講出來，不然使用者看不出少了東西。
+    unscored = sum(r["det_no_score"] for r in rows)
+    if unscored:
+        console.print(
+            f"  [yellow]⚠[/] {unscored} 個 det 框沒有 score，不計入 DET POS"
+        )
+
+
 def _die(message: str) -> None:
     err_console.print(f"[bold red]✗[/] {message}")
     raise typer.Exit(1)
@@ -485,6 +512,7 @@ def show(ref: str = typer.Argument(..., help="manual-set@版本，例如 pneumon
             ],
         )
     )
+    _print_category_distribution(summary["category_distribution"], summary["images"])
 
 
 @app.command()

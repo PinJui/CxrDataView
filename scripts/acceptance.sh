@@ -145,6 +145,20 @@ SELECT (SELECT count(*) FROM (SELECT * FROM a EXCEPT SELECT * FROM b) x) + (SELE
 check "用存下來的 spec 重建，影像集合差異數" "0" "$SPECDIFF"
 check "同一份配方指紋相同" "1" "$($PSQL -c "SELECT count(DISTINCT spec_sha256) FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name IN ('pneumonia_train','specprobe') AND mv.version IN ('V1','V1-rerun')")"
 
+check "cxr show 有 category distribution" "ok" "$($CXR show pneumonia_train@V1 2>&1 | grep -q 'Category distribution' && echo ok || echo 缺)"
+DISTOK=$($PSQL -c "
+WITH d AS (
+  SELECT cm.target_category_id AS tcid,
+         count(DISTINCT msa.image_id) AS labelled
+  FROM manual_set_cls_annotations msa
+  JOIN cls_annotations a ON a.id = msa.cls_annotation_id
+  JOIN manual_set_category_mappings cm
+    ON cm.manual_set_version_id = msa.manual_set_version_id AND cm.category_id = a.category_id
+  WHERE msa.manual_set_version_id = (SELECT mv.id FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='pneumonia_train' AND mv.version='V1')
+  GROUP BY 1)
+SELECT count(*) FROM d WHERE labelled > 394")
+check "沒有 target 的標註影像數超過總數" "0" "$DISTOK"
+
 step "11. 刪掉版本時 spec.yaml 也要跟著消失"
 $CXR build specs/pneumonia_train.yaml -m specrm -v V1 $AUTHOR > /dev/null 2>&1
 $PY -c "from cxr_dataset_manager.storage import get_store; print('yes' if get_store().get_spec('specrm','V1') else 'no')" > /tmp/acc-specrm1 2>&1

@@ -192,3 +192,35 @@ def test_rollback_returns_you_to_where_you_were_standing(session):
     session.rollback("here")
     assert session.head == "source_1", "應該回到標記時所在的位置"
     assert [s.id for s in session.steps] == ["source_1", "source_2"]
+
+
+def test_preview_and_show_report_the_same_category_distribution(session, db):
+    """探索中看到的數字，跟 commit 之後 `cxr show` 看到的必須是同一組。
+
+    這兩份統計是兩套獨立實作（analyzer 走記憶體、crud 走 SQL），鍵名或定義
+    一旦分歧，使用者就會在 commit 前後看到兜不起來的數字——`cxr show` 曾經
+    因為同一類分歧（distinct vs distinct_subjects）必定 crash。
+    """
+    session.add_source(original_set="aws_images", annotation_batch="V1")
+    session.map_category(
+        "aws_images@V1",
+        {"Pneumonia": "pneumonia", "Normal": "normal", "Effusion": "effusion"},
+    )
+    from_preview = {r["target"]: r for r in session.preview()["category_distribution"]}
+
+    result = session.commit(
+        version="V1", author=Author(name="pytest", email="pytest@example.com")
+    )
+    try:
+        from_show = {
+            r["target"]: r
+            for r in crud.version_summary(db, result.manual_set_version_id)[
+                "category_distribution"
+            ]
+        }
+        assert set(from_preview) == set(from_show)
+        for target, row in from_show.items():
+            assert row == from_preview[target], target
+    finally:
+        db.execute(text("DELETE FROM manual_sets WHERE name = :n"), {"n": session.name})
+        db.commit()

@@ -623,6 +623,27 @@ class ExploreShell(cmd.Cmd):
         if dist:
             console.print(_table("類別分布", ["類別", "標註數"],
                                  [[k, v] for k, v in dist.items()]))
+        rows = [r for r in p["category_distribution"] if r["det_all"] or r["cls_pos"]
+                or r["cls_neg"] or r["cls_unknown"] < counts["images"]]
+        if rows:
+            console.print(
+                _table(
+                    f"Category distribution（cls 以影像計，共 {counts['images']} 張；det 以框計）",
+                    ["target category", "CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"],
+                    [[r["target"], r["cls_pos"], r["cls_neg"], r["cls_unknown"], r["det_pos"]]
+                     for r in rows],
+                )
+            )
+            if any(r["cls_pos"] + r["cls_neg"] + r["cls_unknown"] != counts["images"]
+                   for r in rows):
+                console.print(
+                    "  [yellow]⚠[/] 有 target 的三欄相加對不上影像總數——"
+                    "同一張影像被不同來源同時說成陽性和陰性，衝突還沒收斂"
+                    "（打 conflicts 看，resolve 之後就會一致）"
+                )
+            unscored = sum(r["det_no_score"] for r in rows)
+            if unscored:
+                console.print(f"  [yellow]⚠[/] {unscored} 個 det 框沒有 score，不計入 DET POS")
         if p["categories"]["unmapped_local"]:
             console.print(
                 f"  [yellow]⚠[/] 還有 {len(p['categories']['unmapped_local'])} 個 "
