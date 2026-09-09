@@ -124,19 +124,19 @@ check "cxr rm 不動原始資料" "1058" "$($PSQL -c 'SELECT count(*) FROM image
 out=$($CXR why pneumonia_train@V1 --image aws_images/V1/AWS_00004.png 2>&1)
 [ $? -eq 0 ] && check "cxr why <image>" "ok" "ok" || check "cxr why <image>" "ok" "失敗"
 
-step "10. spec 是一份檔案：存得下來、原封不動、能重建"
+step "10. spec 是一份檔案：存得下來（-o）、原封不動、能重建"
 SPEC_KEY=$($PSQL -c "SELECT ms.name||'/annotations/'||mv.version||'/spec.yaml' FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='pneumonia_train' AND mv.version='V1'")
 check "spec 的物件路徑" "pneumonia_train/annotations/V1/spec.yaml" "$SPEC_KEY"
-$CXR spec pneumonia_train@V1 > /tmp/acc-spec.yaml 2>/dev/null
-# 重導向的檔案必須跟物件儲存上那份逐位元組相同。Rich 會把超出主控台寬度的
-# 內容裁掉，而重導向時沒有 tty——這裡就是在守那個坑。
+$CXR spec pneumonia_train@V1 -o /tmp/acc-spec.yaml > /dev/null 2>&1
+# -o 是唯一的存檔路徑：直接寫檔，不經過終端機。存出來的必須跟物件儲存上
+# 那份逐位元組相同。
 $PY - <<'PYEOF' > /tmp/acc-spec-cmp 2>&1
 from cxr_dataset_manager.storage import get_store
 import pathlib
 disk = pathlib.Path("/tmp/acc-spec.yaml").read_text()
 print("same" if disk == get_store().get_spec("pneumonia_train", "V1") else "different")
 PYEOF
-check "重導向存檔與物件儲存逐位元組相同" "same" "$(cat /tmp/acc-spec-cmp)"
+check "cxr spec -o 存出的檔案與物件儲存逐位元組相同" "same" "$(cat /tmp/acc-spec-cmp)"
 $CXR build /tmp/acc-spec.yaml -m specprobe -v V1 $AUTHOR > /dev/null 2>&1
 SPECDIFF=$($PSQL -c "
 WITH a AS (SELECT image_id FROM manual_set_images WHERE manual_set_version_id=(SELECT mv.id FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='pneumonia_train' AND mv.version='V1')),

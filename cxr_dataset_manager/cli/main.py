@@ -39,25 +39,8 @@ app.add_typer(ls_app, name="ls")
 app.add_typer(lists_app, name="lists")
 
 console = Console()
-# 錯誤與警告一律走 stderr：`cxr spec x@V1 > x.yaml` 的 stdout 是資料，
-# 把訊息混進去就等於產出一份壞掉的 YAML。
+# 錯誤走 stderr，跟正常輸出分開——管線接 grep 之類的時候才不會混在一起。
 err_console = Console(stderr=True)
-
-
-def _emit(text_body: str, lexer: str) -> None:
-    """把一份要被原樣保存的文字送到 stdout。
-
-    不能直接 console.print(Syntax(...))：Rich 的 Syntax 預設 word_wrap=False，
-    超出主控台寬度的部分是「裁掉」而不是折行，而重導向到檔案時沒有 tty，
-    寬度就當成 80，CJK 每字還佔兩格。`cxr spec x@V1 > x.yaml` 於是會安靜地
-    產出一份少了字的 YAML——在自己的寬終端上完全看不出來。
-
-    所以只有真的在終端機裡才上色；一旦被導向檔案或管線就原文輸出。
-    """
-    if sys.stdout.isatty():
-        console.print(Syntax(text_body, lexer, theme="ansi_dark"))
-    else:
-        sys.stdout.write(text_body if text_body.endswith("\n") else text_body + "\n")
 
 
 def _spec_line(summary: dict) -> str:
@@ -516,11 +499,19 @@ def show(ref: str = typer.Argument(..., help="manual-set@版本，例如 pneumon
 
 
 @app.command()
-def spec(ref: str = typer.Argument(..., help="manual-set@版本")):
-    """把產生某個版本的 spec 印出來（可直接存檔重跑）。
+def spec(
+    ref: str = typer.Argument(..., help="manual-set@版本"),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o", help="存成 YAML 檔（不加就只是顯示）"
+    ),
+):
+    """檢視某個版本的 spec，或把它存成檔案。
 
-    `cxr spec x@V1 > x.yaml` 是官方的保存方式，所以重導向時一個位元組都不能
-    變：沒有 tty 就走 stdout 原文，有 tty 才交給 Rich 上色。
+    spec 只有三個動作：save（存成 YAML）、view（看）、load（`cxr build` 或
+    REPL 的 load）。存檔一定要用 -o——它直接寫檔案，不經過終端機。
+
+    終端機是給人看的：`cxr spec x@V1` 的輸出經過排版與上色，把它重導向到檔案
+    不會得到一份可用的 spec，那是顯示通道不是資料通道。
     """
     db = new_session()
     version_id = _resolve(db, ref)
@@ -528,8 +519,15 @@ def spec(ref: str = typer.Argument(..., help="manual-set@版本")):
     if loaded["yaml"] is None:
         _die(f"{ref}：{crud._spec_unavailable(loaded)}")
     if loaded["status"] == "modified":
-        err_console.print(f"[yellow]⚠[/] {crud._spec_unavailable(loaded)}")
-    _emit(loaded["yaml"], "yaml")
+        console.print(f"[yellow]⚠[/] {crud._spec_unavailable(loaded)}")
+
+    if out is not None:
+        # 直接寫檔，不碰 console——存下來的必須跟物件儲存上那份逐位元組相同
+        out.expanduser().write_text(loaded["yaml"])
+        console.print(f"[green]✓[/] 已存到 [bold]{out}[/]", soft_wrap=True)
+        return
+    # word_wrap=True：太長的行折行而不是裁掉，畫面上永遠不會少字
+    console.print(Syntax(loaded["yaml"], "yaml", theme="ansi_dark", word_wrap=True))
 
 
 @app.command()
@@ -784,8 +782,8 @@ def rm(
         )
         for v in with_spec:
             console.print(
-                f"      [dim]cxr spec {manual_set}@{v['version']} > "
-                f"{manual_set}_{v['version']}.yaml[/]"
+                f"      [dim]cxr spec {manual_set}@{v['version']} "
+                f"-o {manual_set}_{v['version']}.yaml[/]"
             )
     if plan["removes_manual_set"]:
         console.print(f"  [dim]這會刪掉 {manual_set} 的所有版本，連同這個名稱本身[/]")

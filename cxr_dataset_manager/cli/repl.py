@@ -19,9 +19,9 @@ from typing import Any, Optional
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 
-from cxr_dataset_manager.cli.main import _emit
 from cxr_dataset_manager.core.schema import BuildSpec
 from cxr_dataset_manager.core.types import SpecError
 from cxr_dataset_manager.db import crud
@@ -780,11 +780,12 @@ class ExploreShell(cmd.Cmd):
     # -- 產出 -------------------------------------------------------------
 
     def do_spec(self, arg: str) -> None:
-        """印出目前會編譯出來的 spec。"""
+        """看目前會編譯出來的 spec（只是顯示，要存檔用 save）。"""
         if not self.session.steps:
             return console.print("  [dim]還沒有任何步驟[/]")
         spec = self.session.compile(strict_conflicts=False)
-        _emit(spec.to_yaml(), "yaml")
+        # 純顯示。要存檔請用 save——它直接寫檔案，不經過終端機。
+        console.print(Syntax(spec.to_yaml(), "yaml", theme="ansi_dark", word_wrap=True))
 
     def do_save(self, arg: str) -> None:
         """把 spec 存成 YAML 檔（之後可以用 cxr build 跑，或 load 回來繼續）。

@@ -26,16 +26,14 @@ cxr db init --drop && cxr db seed   # schema + mock data with real problems in i
 cxr explore my_dataset
 ```
 
-The mock data is deliberately messy: 60 cross-source duplicate images, 253 images
+The mock data is deliberately messy: 60 cross-source duplicate images, 253
 labelled by more than one batch (many disagreeing), seven inconsistent category
-namespaces, ~8% of images with no `subject_id`.
+namespaces, ~8% with no `subject_id`.
 
 ## Exploring — `cxr explore`
 An interactive session; nothing reaches the database until you commit.
 
 ```
-$ cxr explore pneumonia_v5
-
 cxr(pneumonia_v5 empty)> source aws_images@V1 --annotation
   290 img · 290 cls · 0 det   head=source_1
 cxr(pneumonia_v5 290img)> source TB-portal@V1 --annotation
@@ -56,9 +54,9 @@ cxr(pneumonia_v5 441img)> commit -m pneumonia -v V5 --dry-run
 
 Other commands: `import` `pick` `intersect` `except` `map` `resolve` `include`
 `exclude` `preview` `steps` `images` `duplicates` `batches` `undo` `checkout`
-`save` `load`; `help <command>` explains each. Every `source` opens a branch —
-`checkout <step>` moves between them; `save` keeps a spec without committing.
-Leaving discards the session.
+`save` `load`; `help <command>` explains each. Every `source` opens a branch and
+`checkout <step>` moves between them; `save` (a temp file if unnamed) keeps a
+spec without committing, and leaving discards the session.
 
 ## Running and inspecting
 
@@ -67,25 +65,27 @@ cxr ls batches                    # how to name sources in a spec
 cxr ls categories                 # local category namespaces per batch
 cxr ls manual-sets                # existing datasets and versions
 cxr ls history                    # every version and the spec that made it
-cxr validate spec.yaml            # syntax only, no database access
+cxr validate spec.yaml            # syntax only, no database
 cxr build spec.yaml -m name -v V1 [--dry-run]   # --dry-run writes nothing
 
-cxr show name@V1                  # composition, sources, category mapping
-cxr spec name@V1                  # the spec that made it (save before rm!)
-cxr why name@V1 --image aws_images/V1/AWS_00344.png
-cxr image 315                     # annotations, lineage, duplicates, users
-cxr diff name@V1 name@V2
-cxr check-leakage train@V1 val@V1
+cxr show name@V1                  # composition, sources, category distribution
+cxr spec name@V1 [-o out.yaml]    # view the spec that made it, or save it (before rm!)
+cxr why name@V1 --image aws_images/V1/AWS_00344.png   # cxr image 315 for one film
+cxr diff name@V1 name@V2          # cxr check-leakage train@V1 val@V1
 cxr export name@V1 -f zip -o ./out   # COCO json + manifest csv + spec
 cxr rm name@V1                       # delete a version
 cxr lists add picks.txt              # register a long file-name list
 ```
 
-Each version keeps its spec at `<name>/annotations/<version>/spec.yaml` in the
-manual-sets bucket; the database holds only its sha256. Lists over 200 names go
-to the database and are referenced by `sha256`, so a spec stays ten lines long
-even with ten thousand file names — `import` and `pick` do this for you. Prefer
-`--dry-run` first: it prints every step's counts and warnings without writing.
+A spec has three operations and no others: **save** (`-o`, or `save` in the
+REPL), **view** (`cxr spec name@V1`), **load** (`cxr build`, or `load`). Saving
+writes the file directly; never redirect a command's output into a file, that is
+the display channel. Each version keeps its spec at
+`<name>/annotations/<version>/spec.yaml` in the manual-sets bucket, with only its
+sha256 in the database. Lists over 200 names go to the database and are
+referenced by `sha256`, so a spec stays ten lines long even with ten thousand
+file names — `import` and `pick` do this for you. Prefer `--dry-run` first: it
+prints every step's counts and warnings without writing.
 `CXR_DEBUG=1` gives tracebacks.
 
 ## Verifying

@@ -112,16 +112,15 @@ steps:
 final: resolved
 ```
 
-Runnable examples live in `specs/`; `pneumonia_train.yaml` and
-`pneumonia_val.yaml` are complementary splits of one seed. The session API
-mirrors these ops plus `preview`, `checkpoint`, `rollback`, `undo`, `checkout`,
-`compile`, `commit`. `undo` removes the step the head is on; `rollback` returns
-to a checkpoint, restoring the step list and where the head stood. `preview()`
-returns statistics — counts, the diff against the previous step, unmapped
-categories, images lacking subject information, and a per-target distribution
-(CLS POS / NEG / UNKNOWN in images, DET POS in boxes) — never a dump of rows.
-`cxr show` reports the same distribution from SQL; the two implementations are
-independent, so a test asserts they agree row for row.
+Runnable examples live in `specs/`. The session API mirrors these ops plus
+`preview`, `checkpoint`, `rollback`, `undo`, `checkout`, `compile`, `commit`:
+`undo` removes the step the head is on, `rollback` returns to a checkpoint,
+restoring the step list and where the head stood. `preview()` returns statistics
+— counts, the diff against the previous step, unmapped categories, images
+lacking subject information, and a per-target distribution (CLS POS / NEG /
+UNKNOWN in images, DET POS in boxes) — never a dump of rows. `cxr show` reports
+the same distribution from SQL, and a test asserts the two independent
+implementations agree row for row.
 
 ## 4. Module responsibilities
 | Module | Owns | Explicitly does not |
@@ -171,18 +170,23 @@ image is also in the set, restored by `prune()` after any removal — which is w
 the composite foreign keys never reject a commit.
 
 ## 6. Design decisions
-**The spec is a file, not a row.** It is a YAML document — read, edited, diffed
-and kept in version control — so committing writes it to object storage at
+**The spec is a file, not a row.** A YAML document — read, edited, diffed, kept
+in version control — so committing writes it to object storage at
 `manual-sets/{name}/annotations/{version}/spec.yaml`, beside the version it
 produced; the location is computed from (name, version), never stored. A copy of
-the body in the database would be one more thing that can disagree with the
-file. What stays is the one thing the file cannot vouch for itself: the sha256,
-saying whether two versions came from the same recipe and catching a spec.yaml
-edited or deleted after the fact (`cxr show` reports both).
-`manual_set_build_specs` is gone, with the run and history tables before it.
-The object is written before the transaction commits; the two are not one
-transaction, so the order is the guarantee — a failed commit leaves an
-unreferenced file, the reverse would leave an unreproducible version.
+the body in the database would be one more thing that can disagree with the file.
+What stays is the one thing the file cannot vouch for itself: the sha256, saying
+whether two versions came from the same recipe and catching a spec.yaml edited or
+deleted after the fact. `manual_set_build_specs` is gone, with the run and
+history tables before it. The object is written before the transaction commits;
+the two are not one transaction, so the order is the guarantee — a failed commit
+leaves an unreferenced file, the reverse would leave an unreproducible version.
+
+**A spec has exactly three operations: save, view, load.** Save writes the file
+directly (`cxr spec ref -o`, or `save` in the REPL), view renders it for a human
+(`cxr spec ref`, wrapped, never cropped), load reads one back (`cxr build`, or
+`load`). Redirecting output into a file is not one of them: stdout is a display
+channel, and treating it as a data channel silently truncated a spec once.
 
 **Conflicts are grouped by image, not by (image, target_category).** Grouped the
 latter way the conflict that matters most is invisible: when source A says
@@ -296,9 +300,8 @@ would test constraints that do not exist.
 `test_cli.py` exists because `cxr show` was once guaranteed to crash on a
 mistyped dict key while being documented and recommended: unit tests covered the
 query, not the line printing it. The same gap recurred twice — Tab completion
-tested by calling the completer while the key was never bound, and
-`cxr spec > file.yaml` dropping text because Rich crops rather than wraps without
-a tty — so both are now tested through the output path itself.
+tested by calling the completer while the key was never bound, and a spec losing
+text on the way to a file — so output paths are now tested as output paths.
 
 ## 9. Known limitations
 - Exploration state lives in the process; leaving `cxr explore` discards it.
@@ -312,9 +315,9 @@ a tty — so both are now tested through the output path itself.
   backfill, lineage building — needing pandas/pyarrow; the runtime does not.
 - `cxr image` shows everything recorded about one image — annotations, lineage,
   duplicates, which datasets use it — but not the film. See `TODO.md`.
-- A version spans two stores, and nothing enforces that spec.yaml still exists
-  or matches: `spec_sha256` detects drift but cannot prevent it, and no
-  `cxr fsck` sweeps every version.
+- A version spans two stores and nothing enforces that spec.yaml still exists or
+  matches: `spec_sha256` detects drift but cannot prevent it, and no `cxr fsck`
+  sweeps every version.
 - Largest tested scale is ~1,000 images; `Catalog` holds every batch it touches
   in memory. The tool runs on the server beside the database, so latency and
   memory have not been treated as constraints.
