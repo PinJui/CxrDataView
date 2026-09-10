@@ -138,6 +138,11 @@ print("same" if disk == get_store().get_spec("pneumonia_train", "V1") else "diff
 PYEOF
 check "cxr spec -o 存出的檔案與物件儲存逐位元組相同" "same" "$(cat /tmp/acc-spec-cmp)"
 $CXR build /tmp/acc-spec.yaml -m specprobe -v V1 $AUTHOR > /dev/null 2>&1
+# spec 也可以直接給 manual-set@版本，從物件儲存沿用那一版的配方
+$CXR build pneumonia_train@V1 -m refprobe -v V1 $AUTHOR > /dev/null 2>&1
+check "cxr build 吃 manual-set@版本" "186ef577cb45cbe0" "$($PSQL -c "SELECT left(mv.spec_sha256,16) FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='refprobe'")"
+out=$($CXR build /nonexistent/manual-sets/x/annotations/V1/spec.yaml -m x -v V1 $AUTHOR 2>&1)
+printf '%s' "$out" | grep -q "manual-set" && check "指向物件路徑時提示改用 ref" "ok" "ok" || check "指向物件路徑時提示改用 ref" "ok" "失敗"
 SPECDIFF=$($PSQL -c "
 WITH a AS (SELECT image_id FROM manual_set_images WHERE manual_set_version_id=(SELECT mv.id FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='pneumonia_train' AND mv.version='V1')),
      b AS (SELECT image_id FROM manual_set_images WHERE manual_set_version_id=(SELECT mv.id FROM manual_set_versions mv JOIN manual_sets ms ON ms.id=mv.manual_set_id WHERE ms.name='specprobe' AND mv.version='V1'))

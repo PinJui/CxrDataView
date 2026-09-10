@@ -6,7 +6,8 @@ CLI 的各個指令共用同一套查詢——介面只是皮，邏輯只寫一�
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Iterable, Optional
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -266,6 +267,58 @@ def load_spec(db: Session, version_id: int) -> dict[str, Any]:
         "sha256": actual,
         "expected": row["spec_sha256"],
     }
+
+
+def load_spec_from(
+    db: Session, token: str, on_warning: Optional[Callable[[str], None]] = None
+) -> BuildSpec:
+    """把使用者給的東西解析成一份 spec。
+
+    收兩種形式：本機 YAML 檔的路徑，或 `manual-set@版本`（從物件儲存讀該
+    版本當初的 spec）。後者存在的理由是「基於上一版改一版」——位置本來就
+    算得出來，不該逼使用者先自己撈一份到本機再打一次路徑。
+    """
+    path = Path(token).expanduser()
+
+    if path.is_dir():
+        # MinIO 的磁碟後端把每個物件存成一個目錄，裡面是 xl.meta。看起來像
+        # 檔案，其實不是，而且開了 erasure coding 之後資料還會散在多顆碟上。
+        if (path / "xl.meta").exists():
+            raise SpecError(
+                f"{path} 是 MinIO 的內部儲存目錄，不是檔案——物件在磁碟上長這樣，"
+                "不能直接讀。請改用 `load <manual-set>@<版本>`，或先 "
+                "`cxr spec <manual-set>@<版本> -o <檔名>` 撈出來。"
+            )
+        raise SpecError(f"{path} 是一個目錄，不是 spec 檔")
+
+    if path.exists():
+        try:
+            return BuildSpec.from_yaml(path.read_text())
+        except SpecError:
+            raise
+        except Exception as exc:
+            raise SpecError(f"{path} 不是一份合法的 spec：\n{exc}") from exc
+
+    if "@" not in token:
+        if "/annotations/" in token:
+            raise SpecError(
+                f"找不到 {token}。看起來你在指物件儲存上的路徑——"
+                "那個位置是算出來的，直接給 `<manual-set>@<版本>` 就好。"
+            )
+        raise SpecError(f"找不到 {token}（給一個 YAML 檔的路徑，或 manual-set@版本）")
+
+    manual_set, version = parse_ref(token)
+    version_id = resolve_version(db, manual_set, version)
+    if version_id is None:
+        raise SpecError(f"找不到 {token}（用 `cxr ls manual-sets` 看有哪些）")
+
+    loaded = load_spec(db, version_id)
+    if loaded["yaml"] is None:
+        raise SpecError(f"{token}：{_spec_unavailable(loaded)}")
+    if loaded["status"] == "modified" and on_warning:
+        # 使用者以為自己在基於 V1 調整，但那個基礎已經跟當初不一樣了
+        on_warning(_spec_unavailable(loaded))
+    return BuildSpec.from_yaml(loaded["yaml"])
 
 
 def version_summary(db: Session, version_id: int) -> dict[str, Any]:

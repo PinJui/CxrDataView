@@ -13,7 +13,8 @@ from sqlalchemy import text
 from cxr_dataset_manager.cli.repl import ExploreShell
 from cxr_dataset_manager.core.engine import execute_spec
 from cxr_dataset_manager.core.schema import BuildSpec
-from cxr_dataset_manager.core.types import Catalog
+from cxr_dataset_manager.core.types import Catalog, SpecError
+from cxr_dataset_manager.db import crud
 
 
 @pytest.fixture
@@ -285,3 +286,57 @@ def test_save_without_a_filename_goes_to_a_temp_file(shell, capsys):
     saved = BuildSpec.from_yaml(path.read_text())
     assert saved.sha256() == shell.session.compile().sha256()
     path.unlink()
+
+
+def test_load_accepts_a_version_ref_not_just_a_file(shell, db, tmp_path):
+    """「基於上一版再改一版」不該逼使用者先把 spec 撈到本機。
+
+    spec 的位置本來就由 (名稱, 版本) 算得出來，給 ref 就夠了。
+    """
+    from cxr_dataset_manager.core.engine import Author, build
+
+    name = f"pytest_{uuid.uuid4().hex[:8]}"
+    spec = BuildSpec.from_yaml(
+        "steps:\n"
+        "  - {id: aws, op: source, original_set: aws_images, annotation_batch: V1}\n"
+        "  - {id: mapped, op: category_map, input: aws,\n"
+        "     mapping: {'aws_images@V1': {Pneumonia: pneumonia, Normal: normal,\n"
+        "                                 Effusion: effusion}}}\n"
+        "final: mapped\n"
+    )
+    build(db, spec, name, "V1", author=Author(name="pytest", email="pytest@example.com"))
+    try:
+        # 解析器拿回來的必須跟當初存進去的是同一份
+        assert crud.load_spec_from(db, f"{name}@V1").sha256() == spec.sha256()
+        # REPL 的 load 把它接進 session（compile() 之後 sha 會變，因為 compile
+        # 會把最後一個 category_map 收緊成 require_total，那是刻意的）
+        run(shell, f"load {name}@V1")
+        assert [st.id for st in shell.session.steps] == ["aws", "mapped"]
+        assert shell.session.current.counts()["images"] > 0
+    finally:
+        db.execute(text("DELETE FROM manual_sets WHERE name = :n"), {"n": name})
+        db.commit()
+
+
+def test_load_refuses_a_minio_storage_directory_and_says_what_to_do(shell, tmp_path):
+    """回歸測試：MinIO 把每個物件存成一個目錄，裡面是 xl.meta。
+
+    直接指過去 path.exists() 是 True，read_text() 才炸出 IsADirectoryError——
+    一個看不出所以然的錯誤。要明講那是內部儲存，並給出正確寫法。
+    """
+    obj = tmp_path / "manual-sets" / "m" / "annotations" / "V1" / "spec.yaml"
+    obj.mkdir(parents=True)
+    (obj / "xl.meta").write_bytes(b"not a spec")
+
+    with pytest.raises(SpecError) as caught:
+        shell.session  # 觸發 fixture
+        crud.load_spec_from(shell.db, str(obj))
+    message = str(caught.value)
+    assert "MinIO" in message and "<manual-set>@<版本>" in message
+
+
+def test_a_missing_object_path_suggests_the_ref_form(shell):
+    """指向物件儲存的路徑但檔案不在時，提示改用 ref，而不是只說找不到。"""
+    with pytest.raises(SpecError) as caught:
+        crud.load_spec_from(shell.db, "/data/minio/manual-sets/m/annotations/V1/spec.yaml")
+    assert "<manual-set>@<版本>" in str(caught.value)

@@ -66,7 +66,7 @@ cxr ls categories                 # local category namespaces per batch
 cxr ls manual-sets                # existing datasets and versions
 cxr ls history                    # every version and the spec that made it
 cxr validate spec.yaml            # syntax only, no database
-cxr build spec.yaml -m name -v V1 [--dry-run]   # --dry-run writes nothing
+cxr build spec.yaml -m name -v V1 [--dry-run]   # or build name@V1 to reuse a recipe
 
 cxr show name@V1                  # composition, sources, category distribution
 cxr spec name@V1 [-o out.yaml]    # view the spec that made it, or save it (before rm!)
@@ -78,9 +78,9 @@ cxr lists add picks.txt              # register a long file-name list
 ```
 
 A spec has three operations and no others: **save** (`-o`, or `save` in the
-REPL), **view** (`cxr spec name@V1`), **load** (`cxr build`, or `load`). Saving
-writes the file directly; never redirect a command's output into a file, that is
-the display channel. Each version keeps its spec at
+REPL), **view** (`cxr spec name@V1`), **load** (`cxr build` or `load`, from a
+file or a `name@V1` ref). Saving writes the file directly; never redirect a
+command's output into a file, that is the display channel. Each version keeps its spec at
 `<name>/annotations/<version>/spec.yaml` in the manual-sets bucket, with only its
 sha256 in the database. Lists over 200 names go to the database and are
 referenced by `sha256`, so a spec stays ten lines long even with ten thousand
@@ -90,7 +90,7 @@ prints every step's counts and warnings without writing.
 
 ## Verifying
 ```bash
-python -m pytest tests/ -q                        # 178 tests
+python -m pytest tests/ -q                        # 181 tests
 psql -h localhost -p 5433 -U postgres -d cxr -f scripts/verify.sql
 ./scripts/acceptance.sh                           # rebuilds and checks everything
 ```

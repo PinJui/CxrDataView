@@ -386,6 +386,17 @@ def lists_show(
 # ---------------------------------------------------------------------------
 
 
+def _spec_argument(db, token: str) -> BuildSpec:
+    """指令列上的 spec 參數：本機檔案或 manual-set@版本。"""
+    try:
+        return crud.load_spec_from(
+            db, token, on_warning=lambda msg: console.print(f"[yellow]⚠[/] {msg}")
+        )
+    except SpecError as exc:
+        _die(str(exc))
+        raise
+
+
 def _load_spec(path: Path) -> BuildSpec:
     if not path.exists():
         _die(f"找不到 spec 檔 {path}")
@@ -413,16 +424,22 @@ def validate(spec_file: Path = typer.Argument(..., help="spec YAML 檔")):
 
 @app.command()
 def build(
-    spec_file: Path = typer.Argument(..., help="spec YAML 檔"),
+    spec_file: str = typer.Argument(
+        ..., help="spec YAML 檔，或 manual-set@版本（沿用該版本當初的 spec）"
+    ),
     manual_set: str = typer.Option(..., "--manual-set", "-m", help="要寫入的 manual-set 名稱"),
     version: str = typer.Option("V1", "--version", "-v"),
     dry_run: bool = typer.Option(False, "--dry-run", help="跑完但不落庫，只看結果"),
     author_name: Optional[str] = typer.Option(None, "--author-name", help="建立者姓名"),
     author_email: Optional[str] = typer.Option(None, "--author-email", help="建立者 email"),
 ):
-    """執行一份 spec，產出 manual-set 版本。"""
-    spec = _load_spec(spec_file)
+    """執行一份 spec，產出 manual-set 版本。
+
+    spec 可以是本機檔案，也可以是 `manual-set@版本`——後者直接沿用那個版本
+    當初的配方，用來「照 V1 的做法再做一版」。
+    """
     db = new_session()
+    spec = _spec_argument(db, spec_file)
     author = None if dry_run else _resolve_author(author_name, author_email)
     try:
         result = run_build(db, spec, manual_set, version, dry_run=dry_run, author=author)

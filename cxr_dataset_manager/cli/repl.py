@@ -816,12 +816,16 @@ class ExploreShell(cmd.Cmd):
     def do_load(self, arg: str) -> None:
         """載入一份既有 spec，接著往下探索。
 
-        load pneumonia_v5.yaml
+        load pneumonia_v5.yaml     從本機檔案
+        load pneumonia@V1          從物件儲存讀該版本當初的 spec
         """
-        path = Path(arg.strip()).expanduser()
-        if not path.exists():
-            raise SpecError(f"找不到 {path}")
-        self.session.replay(BuildSpec.from_yaml(path.read_text()))
+        token = arg.strip()
+        if not token:
+            return console.print("  用法：load <檔名.yaml> 或 <manual-set>@<版本>")
+        spec = crud.load_spec_from(
+            self.db, token, on_warning=lambda msg: console.print(f"  [yellow]⚠[/] {msg}")
+        )
+        self.session.replay(spec)
         console.print(f"  [green]✓[/] 已載入 {len(self.session.steps)} 個步驟")
         self._report()
 

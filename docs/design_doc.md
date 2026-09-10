@@ -183,7 +183,7 @@ leaves an unreferenced file, the reverse would leave an unreproducible version.
 
 **A spec has exactly three operations: save, view, load.** Save writes the file
 directly (`cxr spec ref -o`, or `save` in the REPL), view renders it for a human
-(wrapped, never cropped), load reads one back (`cxr build`, or `load`).
+(wrapped, never cropped), load reads one back from a file or a `name@V1` ref.
 Redirecting output into a file is not one of them: stdout is a display channel,
 and treating it as a data channel silently truncated a spec once.
 
@@ -281,7 +281,7 @@ outside the transaction is the spec object, written first on purpose.
 everything from scratch and runs 50 end-to-end checks.
 
 ## 8. Testing
-178 tests against real PostgreSQL, not SQLite: the deferred triggers, composite
+181 tests against real PostgreSQL, not SQLite: the deferred triggers, composite
 FKs, `ARRAY` and `JSONB` do not exist there, so SQLite would test nothing real.
 
 | File | Covers |
