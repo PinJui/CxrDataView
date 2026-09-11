@@ -17,9 +17,9 @@ Spec 是探索完之後的乾淨記錄，但沒有人能一次寫對。日常使
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Optional
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -27,12 +27,12 @@ from cxr_dataset_manager.core import ops
 from cxr_dataset_manager.core.engine import execute_spec
 from cxr_dataset_manager.core.schema import (
     BuildSpec,
-    FileNamesRef,
     CategoryMapStep,
     ConflictResolveStep,
     ConflictRule,
     DedupStep,
     ExceptStep,
+    FileNamesRef,
     FilterStep,
     ImportListStep,
     IntersectStep,
@@ -46,7 +46,6 @@ from cxr_dataset_manager.core.schema import (
 from cxr_dataset_manager.core.types import CandidateSet, Catalog, SpecError, StepResult
 from cxr_dataset_manager.db import crud
 from cxr_dataset_manager.session import analyzer
-
 
 # 超過這個筆數，清單就不再內嵌進 spec，改存資料庫、spec 只留 sha256。
 # 200 筆的 spec 還讀得下去；上千筆之後 `cxr spec` 印出來的東西沒有人看得完，
@@ -79,8 +78,8 @@ class ManualSetSession:
         self,
         db: Session,
         name: str,
-        catalog: Optional[Catalog] = None,
-        on_warning: Optional[Callable[[str], None]] = None,
+        catalog: Catalog | None = None,
+        on_warning: Callable[[str], None] | None = None,
     ) -> None:
         self.db = db
         self.name = name
@@ -92,11 +91,11 @@ class ManualSetSession:
         self.results: dict[str, CandidateSet] = {}
         self.reports: dict[str, StepResult] = {}
         self.checkpoints: dict[str, int] = {}
-        self._checkpoint_heads: dict[str, Optional[str]] = {}
+        self._checkpoint_heads: dict[str, str | None] = {}
         self.action_log: list[dict[str, Any]] = []
-        self.head: Optional[str] = None
+        self.head: str | None = None
         self._counter: dict[str, int] = {}
-        self._last_import: Optional[ImportReport] = None
+        self._last_import: ImportReport | None = None
 
     # -- 內部 -------------------------------------------------------------
 
@@ -109,7 +108,9 @@ class ManualSetSession:
         consumed = {dep for step in self.steps for dep in step.input_ids()}
         return [s.id for s in self.steps if s.id not in consumed]
 
-    def _apply(self, step: Step, file_names: Optional[list[str]] = None) -> "ManualSetSession":
+    def _apply(
+        self, step: Step, file_names: list[str] | None = None
+    ) -> ManualSetSession:
         """執行一個 step 並接到 steps 清單尾巴。
 
         失敗時 steps 清單保持不變——探索中打錯一個參數不該讓整個
@@ -142,7 +143,9 @@ class ManualSetSession:
 
     def _require_head(self, action: str) -> str:
         if self.head is None:
-            raise SpecError(f"{action} 需要先有資料——請先 add_source() 或 import_list()")
+            raise SpecError(
+                f"{action} needs data first — call add_source() or import_list()"
+            )
         return self.head
 
     @property
@@ -154,9 +157,11 @@ class ManualSetSession:
     # -- 來源 -------------------------------------------------------------
 
     def add_source(
-        self, original_set: str, image_batch: Optional[str] = None,
-        annotation_batch: Optional[str] = None,
-    ) -> "ManualSetSession":
+        self,
+        original_set: str,
+        image_batch: str | None = None,
+        annotation_batch: str | None = None,
+    ) -> ManualSetSession:
         return self._apply(
             SourceStep(
                 id=self._next_id("source"),
@@ -167,9 +172,13 @@ class ManualSetSession:
         )
 
     def import_list(
-        self, original_set: str, image_batch: str, file_names: Iterable[str],
-        on_missing: str = "error", source_note: Optional[str] = None,
-    ) -> "ManualSetSession":
+        self,
+        original_set: str,
+        image_batch: str,
+        file_names: Iterable[str],
+        on_missing: str = "error",
+        source_note: str | None = None,
+    ) -> ManualSetSession:
         """直接匯入外部 file_name 清單（design_doc §3）。
 
         探索階段建議先用 on_missing="warn" 看匹配結果，確認沒問題後，
@@ -195,7 +204,7 @@ class ManualSetSession:
         return self
 
     def _list_payload(
-        self, names: list[str], source_note: Optional[str] = None
+        self, names: list[str], source_note: str | None = None
     ) -> dict[str, Any]:
         """決定這份清單要內嵌進 spec，還是存進資料庫只留 sha256。
 
@@ -208,34 +217,38 @@ class ManualSetSession:
         digest, created = crud.register_import_list(self.db, names, source_note)
         if created:
             self.on_warning(
-                f"清單有 {len(names)} 筆，已存進資料庫（sha256 {digest[:12]}…），"
-                "spec 只會保留這個雜湊"
+                f"the list has {len(names)} names, so it was stored in the database (sha256 {digest[:12]}…); "
+                "the spec keeps only this hash"
             )
         return {"file_names_ref": FileNamesRef(sha256=digest, source=source_note)}
 
-    def last_import_report(self) -> Optional[ImportReport]:
+    def last_import_report(self) -> ImportReport | None:
         return self._last_import
 
     # -- 集合運算 ---------------------------------------------------------
 
-    def union(self, inputs: Optional[list[str]] = None) -> "ManualSetSession":
+    def union(self, inputs: list[str] | None = None) -> ManualSetSession:
         branches = inputs or self._open_branches()
         if len(branches) < 2:
-            raise SpecError(f"union 需要至少兩條分支，目前只有 {branches}")
+            raise SpecError(f"union needs at least two branches; there is only {branches}")
         return self._apply(UnionStep(id=self._next_id("union"), inputs=branches))
 
-    def intersect(self, inputs: Optional[list[str]] = None) -> "ManualSetSession":
+    def intersect(self, inputs: list[str] | None = None) -> ManualSetSession:
         branches = inputs or self._open_branches()
-        return self._apply(IntersectStep(id=self._next_id("intersect"), inputs=branches))
+        return self._apply(
+            IntersectStep(id=self._next_id("intersect"), inputs=branches)
+        )
 
-    def exclude(self, inputs: Optional[list[str]] = None) -> "ManualSetSession":
+    def exclude(self, inputs: list[str] | None = None) -> ManualSetSession:
         branches = inputs or self._open_branches()
         return self._apply(ExceptStep(id=self._next_id("except"), inputs=branches))
 
     # -- filter -----------------------------------------------------------
 
-    def filter(self, criterion: str = "sample", input: Optional[str] = None, **kwargs) -> "ManualSetSession":
-        names: Optional[list[str]] = None
+    def filter(
+        self, criterion: str = "sample", input: str | None = None, **kwargs
+    ) -> ManualSetSession:
+        names: list[str] | None = None
         if criterion == "explicit_list" and "file_names" in kwargs:
             names = crud.normalize_file_names(kwargs.pop("file_names"))
             kwargs.update(self._list_payload(names, kwargs.pop("source_note", None)))
@@ -249,12 +262,21 @@ class ManualSetSession:
             file_names=names,
         )
 
-    def split(self, mod: int, keep_remainder: list[int], seed: str,
-              key_field: str = "subject_id") -> "ManualSetSession":
+    def split(
+        self,
+        mod: int,
+        keep_remainder: list[int],
+        seed: str,
+        key_field: str = "subject_id",
+    ) -> ManualSetSession:
         """filter(criterion='sample') 的白話版：決定性切割。"""
         return self.filter(
-            criterion="sample", method="hash_mod", key_field=key_field,
-            mod=mod, keep_remainder=keep_remainder, seed=seed,
+            criterion="sample",
+            method="hash_mod",
+            key_field=key_field,
+            mod=mod,
+            keep_remainder=keep_remainder,
+            seed=seed,
         )
 
     # -- dedup ------------------------------------------------------------
@@ -264,9 +286,11 @@ class ManualSetSession:
         return ops.find_duplicates(self.catalog, self.current)
 
     def dedup(
-        self, source_priority: Optional[list[str]] = None, key: str = "blake3",
-        keep: Optional[list[int]] = None,
-    ) -> "ManualSetSession":
+        self,
+        source_priority: list[str] | None = None,
+        key: str = "blake3",
+        keep: list[int] | None = None,
+    ) -> ManualSetSession:
         return self._apply(
             DedupStep(
                 id=self._next_id("dedup"),
@@ -279,23 +303,27 @@ class ManualSetSession:
 
     def balance(
         self, max_per_class: int, seed: str, by: str = "target"
-    ) -> "ManualSetSession":
+    ) -> ManualSetSession:
         """把每個類別的影像數壓到 max_per_class 以下。"""
         return self.filter(
             criterion="balance", max_per_class=max_per_class, seed=seed, by=by
         )
 
-    def keep_annotated_only(self) -> "ManualSetSession":
+    def keep_annotated_only(self) -> ManualSetSession:
         """剔除沒有標註的影像——manual-set 不接受它們。"""
         return self.filter(criterion="annotated")
 
     # -- category mapping -------------------------------------------------
 
     def map_category(
-        self, scope: Optional[str] = None, mapping: Optional[dict[str, str]] = None,
-        *, merge_identical: bool = False, require_total: bool = False,
-        full_mapping: Optional[dict[str, dict[str, str]]] = None,
-    ) -> "ManualSetSession":
+        self,
+        scope: str | None = None,
+        mapping: dict[str, str] | None = None,
+        *,
+        merge_identical: bool = False,
+        require_total: bool = False,
+        full_mapping: dict[str, dict[str, str]] | None = None,
+    ) -> ManualSetSession:
         """s.map_category("aws_images@V1", {"Pneumonia": "pneumonia"})
 
         scope 一定要寫清楚是哪個 annotation_batch 的 category——
@@ -316,7 +344,7 @@ class ManualSetSession:
             )
         )
 
-    def merge_identical_category(self) -> "ManualSetSession":
+    def merge_identical_category(self) -> ManualSetSession:
         """design_doc §3：先把完全同名的 local category 合併成同名的 target。"""
         return self.map_category(merge_identical=True)
 
@@ -331,7 +359,7 @@ class ManualSetSession:
     def conflict_summary(self) -> dict[str, Any]:
         return analyzer.conflict_summary(self.catalog, self.current)
 
-    def _resolve(self, rule: ConflictRule) -> "ManualSetSession":
+    def _resolve(self, rule: ConflictRule) -> ManualSetSession:
         # strict=False：探索階段先讓規則覆蓋不到的部分現形，
         # 而不是當場中斷；compile() 會把最後一步收緊成 strict
         return self._apply(
@@ -345,19 +373,23 @@ class ManualSetSession:
 
     def resolve_conflicts_by_annotator_precedence(
         self, annotator_precedence: list[str]
-    ) -> "ManualSetSession":
+    ) -> ManualSetSession:
         return self._resolve(
-            ConflictRule(rule="annotator_precedence", annotator_precedence=annotator_precedence)
+            ConflictRule(
+                rule="annotator_precedence", annotator_precedence=annotator_precedence
+            )
         )
 
     def resolve_conflicts_by_annotation_version(
         self, version_precedence: list[str]
-    ) -> "ManualSetSession":
+    ) -> ManualSetSession:
         return self._resolve(
-            ConflictRule(rule="batch_version_precedence", version_precedence=version_precedence)
+            ConflictRule(
+                rule="batch_version_precedence", version_precedence=version_precedence
+            )
         )
 
-    def resolve_conflicts_by_score(self) -> "ManualSetSession":
+    def resolve_conflicts_by_score(self) -> ManualSetSession:
         return self._resolve(ConflictRule(rule="highest_score"))
 
     def unresolved_conflicts(self) -> list[dict[str, Any]]:
@@ -366,7 +398,7 @@ class ManualSetSession:
 
     # -- 人工介入 ---------------------------------------------------------
 
-    def override(self, overrides: list[dict[str, Any]]) -> "ManualSetSession":
+    def override(self, overrides: list[dict[str, Any]]) -> ManualSetSession:
         return self._apply(
             ManualOverrideStep(
                 id=self._next_id("manual_override"),
@@ -375,14 +407,14 @@ class ManualSetSession:
             )
         )
 
-    def exclude_image(self, image_id: int, reason: str = "") -> "ManualSetSession":
-        return self.override([
-            {"action": "exclude_image", "image_id": image_id, "reason": reason}
-        ])
+    def exclude_image(self, image_id: int, reason: str = "") -> ManualSetSession:
+        return self.override(
+            [{"action": "exclude_image", "image_id": image_id, "reason": reason}]
+        )
 
     def override_one(
         self, include: bool, kind: str, target_id: int, reason: str = ""
-    ) -> "ManualSetSession":
+    ) -> ManualSetSession:
         """指名一個 id，納入或排除。kind 是 image / cls / det。"""
         verb = "include" if include else "exclude"
         if kind == "image":
@@ -394,12 +426,14 @@ class ManualSetSession:
                 "annotation_kind": kind,
             }
         else:
-            raise SpecError(f"不認得的對象 {kind!r}（可用：image / cls / det）")
+            raise SpecError(f"unknown target {kind!r} (use image / cls / det)")
         return self.override([{**action, "reason": reason}])
 
     def resolve_conflicts_by_manual_setting(
-        self, designated_annotation_id: int, reason: str = "",
-    ) -> "ManualSetSession":
+        self,
+        designated_annotation_id: int,
+        reason: str = "",
+    ) -> ManualSetSession:
         """人工指定衝突裡要留下哪一筆標註。"""
         return self._resolve(
             ConflictRule(
@@ -427,7 +461,7 @@ class ManualSetSession:
 
     # -- checkpoint / rollback --------------------------------------------
 
-    def checkpoint(self, label: str) -> "ManualSetSession":
+    def checkpoint(self, label: str) -> ManualSetSession:
         """記下目前 steps 清單的長度與所在位置。
 
         位置也要記：有了 checkout 之後，head 不一定在清單尾端，
@@ -445,14 +479,16 @@ class ManualSetSession:
         )
         return self
 
-    def rollback(self, label: str) -> "ManualSetSession":
+    def rollback(self, label: str) -> ManualSetSession:
         """把 steps 清單截回 checkpoint 當時的長度。
 
         不需要撤銷任何資料庫寫入——這些操作在 commit 之前都只存在
         session 的記憶體狀態裡。
         """
         if label not in self.checkpoints:
-            raise SpecError(f"沒有名為 '{label}' 的 checkpoint（現有: {list(self.checkpoints)}）")
+            raise SpecError(
+                f"no checkpoint named '{label}' (existing: {list(self.checkpoints)})"
+            )
         keep = self.checkpoints[label]
         dropped = [s.id for s in self.steps[keep:]]
         self.steps = self.steps[:keep]
@@ -462,7 +498,8 @@ class ManualSetSession:
         # 回到 checkpoint 當時所在的位置，而不是清單尾端
         remembered = self._checkpoint_heads.get(label)
         self.head = (
-            remembered if remembered in self.results
+            remembered
+            if remembered in self.results
             else (self.steps[-1].id if self.steps else None)
         )
         self.checkpoints = {k: v for k, v in self.checkpoints.items() if v <= keep}
@@ -479,7 +516,7 @@ class ManualSetSession:
         )
         return self
 
-    def checkout(self, step_id: str) -> "ManualSetSession":
+    def checkout(self, step_id: str) -> ManualSetSession:
         """把目前位置移到某個既有步驟。
 
         每個 source / import 都會開一條新分支，沒有這個就只能加工「剛好是
@@ -488,7 +525,7 @@ class ManualSetSession:
         """
         if step_id not in self.results:
             raise SpecError(
-                f"沒有名為 '{step_id}' 的步驟（現有：{', '.join(s.id for s in self.steps) or '無'}）"
+                f"no step named '{step_id}' (existing: {', '.join(s.id for s in self.steps) or 'none'})"
             )
         self.head = step_id
         self.action_log.append(
@@ -500,7 +537,7 @@ class ManualSetSession:
         )
         return self
 
-    def undo(self) -> "ManualSetSession":
+    def undo(self) -> ManualSetSession:
         """復原**目前所在**的那一步，位置退回它的 input。
 
         刻意不是「刪掉清單最後一筆」：有了 checkout 之後那會刪到別條分支上
@@ -514,8 +551,8 @@ class ManualSetSession:
         dependents = [s.id for s in self.steps if target in s.input_ids()]
         if dependents:
             raise SpecError(
-                f"'{target}' 還被 {', '.join(dependents)} 當成 input，不能復原。"
-                f"要先復原 {dependents[-1]}，或用 checkout 換個位置。"
+                f"'{target}' is still used as input by {', '.join(dependents)}, so it cannot be undone. "
+                f"Undo {dependents[-1]} first, or checkout another step."
             )
 
         step = next(s for s in self.steps if s.id == target)
@@ -523,9 +560,7 @@ class ManualSetSession:
         self.steps = [s for s in self.steps if s.id != target]
         self.results.pop(target, None)
         self.reports.pop(target, None)
-        self.head = (
-            inputs[0] if inputs else (self.steps[-1].id if self.steps else None)
-        )
+        self.head = inputs[0] if inputs else (self.steps[-1].id if self.steps else None)
         self.action_log.append(
             {
                 "at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -537,7 +572,9 @@ class ManualSetSession:
 
     # -- compile / commit -------------------------------------------------
 
-    def compile(self, *, strict_conflicts: bool = True, description: Optional[str] = None) -> BuildSpec:
+    def compile(
+        self, *, strict_conflicts: bool = True, description: str | None = None
+    ) -> BuildSpec:
         """把目前的 steps 清單整理成一份乾淨的 spec。
 
         三件事會在這裡補上，都會實際寫進 spec（不是隱形行為）：
@@ -548,7 +585,7 @@ class ManualSetSession:
              category 必須當場報錯，不是悄悄丟掉它的標註。
         """
         if not self.steps:
-            raise SpecError("session 還沒有任何 step，沒東西可以 compile")
+            raise SpecError("the session has no steps yet; nothing to compile")
 
         steps: list[Step] = [s.model_copy(deep=True) for s in self.steps]
         consumed = {dep for s in steps for dep in s.input_ids()}
@@ -579,11 +616,17 @@ class ManualSetSession:
         )
 
     def commit(
-        self, spec: Optional[BuildSpec] = None, version: str = "V1",
-        manual_set_name: Optional[str] = None, dry_run: bool = False,
+        self,
+        spec: BuildSpec | None = None,
+        version: str = "V1",
+        manual_set_name: str | None = None,
+        dry_run: bool = False,
         author=None,
+        meta=None,
     ):
         """編譯出 spec、執行它，產出正式的 manual-set 版本。
+
+        `meta` is passed through to build(): it writes the version's __meta__.md.
 
         走的是跟 CLI `cxr build` 完全同一支 engine——探索用的路徑跟正式
         產出用的路徑不會分岔（design_doc §1 principle 7）。
@@ -596,13 +639,18 @@ class ManualSetSession:
 
         spec = spec or self.compile()
         return build(
-            self.db, spec, manual_set_name or self.name, version,
-            dry_run=dry_run, author=author,
+            self.db,
+            spec,
+            manual_set_name or self.name,
+            version,
+            dry_run=dry_run,
+            author=author,
+            meta=meta,
         )
 
     # -- 其他 -------------------------------------------------------------
 
-    def replay(self, spec: BuildSpec) -> "ManualSetSession":
+    def replay(self, spec: BuildSpec) -> ManualSetSession:
         """載入一份既有 spec，接著往下探索（`cxr build` 的反向操作）。"""
         execution = execute_spec(self.db, spec, self.catalog)
         self.steps = list(spec.steps)

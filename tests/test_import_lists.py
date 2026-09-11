@@ -6,8 +6,6 @@
 
 import uuid
 
-
-
 import pytest
 from sqlalchemy import text
 
@@ -73,7 +71,7 @@ def test_duplicates_are_preserved_not_silently_collapsed(db):
 
 
 def test_empty_list_is_refused(db):
-    with pytest.raises(SpecError, match="空的"):
+    with pytest.raises(SpecError, match="empty"):
         crud.register_import_list(db, ["", "   "])
 
 
@@ -210,7 +208,9 @@ def test_a_long_list_survives_the_full_round_trip(db, real_names):
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     session = ManualSetSession(db, name=name)
     session.import_list(
-        original_set="DrLee", image_batch="V1", file_names=_big(real_names),
+        original_set="DrLee",
+        image_batch="V1",
+        file_names=_big(real_names),
         on_missing="warn",
     )
     # manual-set 不接受沒標註的影像，所以匯入之後要明確剔除掉那些

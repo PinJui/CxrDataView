@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 from cxr_dataset_manager.core import predicate as pred
 from cxr_dataset_manager.core.schema import (
@@ -32,20 +33,23 @@ from cxr_dataset_manager.core.schema import (
     IntersectStep,
     ManualOverrideStep,
     SourceStep,
-    Step,
     UnionStep,
 )
 from cxr_dataset_manager.core.types import (
-    Catalog,
     CandidateSet,
+    Catalog,
     Decision,
     SpecError,
     StepResult,
 )
 
+
 def _drop_images(
-    cand: CandidateSet, catalog: Catalog, image_ids: Iterable[int], reason: str,
-    detail_of: Optional[Callable[[int], dict[str, Any]]] = None,
+    cand: CandidateSet,
+    catalog: Catalog,
+    image_ids: Iterable[int],
+    reason: str,
+    detail_of: Callable[[int], dict[str, Any]] | None = None,
 ) -> list[Decision]:
     """移除影像並連帶移除其標註，回傳對應的裁決記錄。"""
     decisions: list[Decision] = []
@@ -55,7 +59,10 @@ def _drop_images(
     for image_id in dropped:
         decisions.append(
             Decision(
-                "image", image_id, "dropped", reason,
+                "image",
+                image_id,
+                "dropped",
+                reason,
                 detail_of(image_id) if detail_of else None,
             )
         )
@@ -63,12 +70,16 @@ def _drop_images(
     for ann_id in [a for a in cand.cls if catalog.cls(a).image_id in dropped]:
         cand.cls.discard(ann_id)
         decisions.append(
-            Decision("cls_annotation", ann_id, "dropped", f"{reason}:image_dropped", None)
+            Decision(
+                "cls_annotation", ann_id, "dropped", f"{reason}:image_dropped", None
+            )
         )
     for ann_id in [a for a in cand.det if catalog.det(a).image_id in dropped]:
         cand.det.discard(ann_id)
         decisions.append(
-            Decision("det_annotation", ann_id, "dropped", f"{reason}:image_dropped", None)
+            Decision(
+                "det_annotation", ann_id, "dropped", f"{reason}:image_dropped", None
+            )
         )
     return decisions
 
@@ -81,8 +92,8 @@ def _merge_targets(inputs: list[CandidateSet], step_id: str) -> dict[int, str]:
         for category_id, target in cand.category_targets.items():
             if merged.setdefault(category_id, target) != target:
                 raise SpecError(
-                    f"step '{step_id}': local category {category_id} 在不同分支被映射成 "
-                    f"'{merged[category_id]}' 與 '{target}'，請先統一再合併"
+                    f"step '{step_id}': local category {category_id} is mapped to "
+                    f"'{merged[category_id]}' and '{target}' on different branches; make them agree before merging"
                 )
     return merged
 
@@ -92,7 +103,9 @@ def _merge_targets(inputs: list[CandidateSet], step_id: str) -> dict[int, str]:
 # ---------------------------------------------------------------------------
 
 
-def op_source(catalog: Catalog, inputs: list[CandidateSet], step: SourceStep) -> StepResult:
+def op_source(
+    catalog: Catalog, inputs: list[CandidateSet], step: SourceStep
+) -> StepResult:
     cand = CandidateSet()
     decisions: list[Decision] = []
 
@@ -127,23 +140,32 @@ def op_source(catalog: Catalog, inputs: list[CandidateSet], step: SourceStep) ->
                     "annotation_sources": sources,
                 }
             )
-            unannotated = len(cand.images - (
-                {catalog.cls(a).image_id for a in cls_ids}
-                | {catalog.det(a).image_id for a in det_ids}
-            ))
+            unannotated = len(
+                cand.images
+                - (
+                    {catalog.cls(a).image_id for a in cls_ids}
+                    | {catalog.det(a).image_id for a in det_ids}
+                )
+            )
             if sources:
                 warnings.append(
-                    f"step '{step.id}': 連同 {len(cls_ids) + len(det_ids)} 筆標註一起帶入"
-                    f"（來自 {', '.join(sources)}）"
-                    + (f"；{unannotated} 張影像尚未被標註" if unannotated else "")
+                    f"step '{step.id}': Bringing {len(cls_ids) + len(det_ids)} annotations on these images"
+                    f" (from {', '.join(sources)})"
+                    + (
+                        f"; {unannotated} images are not annotated"
+                        if unannotated
+                        else ""
+                    )
                 )
             elif cand.images:
                 warnings.append(
-                    f"step '{step.id}': 這批影像目前沒有任何標註"
+                    f"step '{step.id}': this image batch has no annotations yet"
                 )
     else:
         assert step.annotation_batch
-        batch_id = catalog.resolve_annotation_batch(step.original_set, step.annotation_batch)
+        batch_id = catalog.resolve_annotation_batch(
+            step.original_set, step.annotation_batch
+        )
         cls_ids, det_ids = catalog.load_annotation_batch(batch_id)
         cand.cls = set(cls_ids)
         cand.det = set(det_ids)
@@ -171,14 +193,14 @@ def op_import_list(
     catalog: Catalog,
     inputs: list[CandidateSet],
     step: ImportListStep,
-    file_names: Optional[list[str]] = None,
+    file_names: list[str] | None = None,
 ) -> StepResult:
     """外部清單匯入。缺漏一定留痕，讓使用者能一次修完整份清單（design_doc §1 principle 6）。"""
     names = file_names if file_names is not None else (step.file_names or [])
     if not names:
         raise SpecError(
-            f"step '{step.id}': file_names_ref 指到的清單是空的"
-            "（engine 應該先從 manual_set_import_lists 取出本體再呼叫）"
+            f"step '{step.id}': the list behind file_names_ref is empty"
+            " (the engine should load it from manual_set_import_lists before calling)"
         )
 
     batch_id = catalog.resolve_image_batch(step.original_set, step.image_batch)
@@ -217,15 +239,15 @@ def op_import_list(
         )
         if sources:
             warnings.append(
-                f"step '{step.id}': 連同 {len(cls_ids) + len(det_ids)} 筆標註一起帶入"
-                f"（來自 {', '.join(sources)}）"
+                f"step '{step.id}': Bringing {len(cls_ids) + len(det_ids)} annotations on these images"
+                f" (from {', '.join(sources)})"
             )
 
     if missing:
         msg = (
-            f"step '{step.id}': 清單有 {len(missing)} 筆在 "
-            f"{step.original_set}@{step.image_batch} 裡對不上"
-            f"（前幾筆: {', '.join(missing[:5])}）"
+            f"step '{step.id}': {len(missing)} names in the list match nothing in "
+            f"{step.original_set}@{step.image_batch}"
+            f" (first few: {', '.join(missing[:5])})"
         )
         if step.on_missing == "error":
             raise SpecError(msg)
@@ -233,7 +255,7 @@ def op_import_list(
             warnings.append(msg)
     if duplicated_in_list:
         warnings.append(
-            f"step '{step.id}': 清單內有 {len(duplicated_in_list)} 筆重複檔名，已自動去重"
+            f"step '{step.id}': the list repeats {len(duplicated_in_list)} file names; the repeats were ignored"
         )
 
     stats = {
@@ -256,19 +278,25 @@ def op_import_list(
 # ---------------------------------------------------------------------------
 
 
-def op_union(catalog: Catalog, inputs: list[CandidateSet], step: UnionStep) -> StepResult:
+def op_union(
+    catalog: Catalog, inputs: list[CandidateSet], step: UnionStep
+) -> StepResult:
     cand = CandidateSet(category_targets=_merge_targets(inputs, step.id))
     for other in inputs:
         cand.images |= other.images
         cand.cls |= other.cls
         cand.det |= other.det
     per_input = [c.counts() for c in inputs]
-    overlap = len(set.intersection(*[c.images for c in inputs])) if len(inputs) > 1 else 0
+    overlap = (
+        len(set.intersection(*[c.images for c in inputs])) if len(inputs) > 1 else 0
+    )
     stats = {"inputs": per_input, "image_overlap": overlap, **cand.counts()}
     return StepResult(cand.prune(catalog), stats)
 
 
-def op_intersect(catalog: Catalog, inputs: list[CandidateSet], step: IntersectStep) -> StepResult:
+def op_intersect(
+    catalog: Catalog, inputs: list[CandidateSet], step: IntersectStep
+) -> StepResult:
     cand = CandidateSet(category_targets=_merge_targets(inputs, step.id))
     cand.images = set.intersection(*[c.images for c in inputs])
     cand.cls = set.intersection(*[c.cls for c in inputs])
@@ -277,7 +305,9 @@ def op_intersect(catalog: Catalog, inputs: list[CandidateSet], step: IntersectSt
     return StepResult(cand.prune(catalog), stats)
 
 
-def op_except(catalog: Catalog, inputs: list[CandidateSet], step: ExceptStep) -> StepResult:
+def op_except(
+    catalog: Catalog, inputs: list[CandidateSet], step: ExceptStep
+) -> StepResult:
     base, *rest = inputs
     cand = base.copy()
     removed: set[int] = set()
@@ -288,7 +318,11 @@ def op_except(catalog: Catalog, inputs: list[CandidateSet], step: ExceptStep) ->
         cand.det -= other.det
     decisions = [Decision("image", i, "dropped", "except") for i in removed]
     cand.prune(catalog)
-    stats = {"inputs": [c.counts() for c in inputs], "images_removed": len(removed), **cand.counts()}
+    stats = {
+        "inputs": [c.counts() for c in inputs],
+        "images_removed": len(removed),
+        **cand.counts(),
+    }
     return StepResult(cand, stats, decisions)
 
 
@@ -306,7 +340,7 @@ def op_filter(
     catalog: Catalog,
     inputs: list[CandidateSet],
     step: FilterStep,
-    file_names: Optional[list[str]] = None,
+    file_names: list[str] | None = None,
 ) -> StepResult:
     """file_names 由 engine 傳入：step 用 file_names_ref 時，本體在資料庫裡，
     op 本身不查資料庫（保持純函式）。"""
@@ -378,9 +412,15 @@ def _filter_sample(
         else:
             drop.add(image_id)
             subjects_dropped.add(key)
-            detail[image_id] = {"key": key, "bucket": bucket, "subject_unknown": is_fallback}
+            detail[image_id] = {
+                "key": key,
+                "bucket": bucket,
+                "subject_unknown": is_fallback,
+            }
 
-    decisions = _drop_images(cand, catalog, drop, "filter:sample", lambda i: detail.get(i))
+    decisions = _drop_images(
+        cand, catalog, drop, "filter:sample", lambda i: detail.get(i)
+    )
     cand.prune(catalog)
 
     stats = {
@@ -402,11 +442,11 @@ def _filter_sample(
     warnings = []
     if step.key_field == "subject_id" and fallback_images:
         warnings.append(
-            f"step '{step.id}': {fallback_images} 張影像沒有 subject 資訊，"
-            "已 fallback 用 image_id 切割——這部分沒有病患層級的 leakage 保證"
+            f"step '{step.id}': {fallback_images} images have no subject information "
+            "and were split by image_id instead — no patient-level leakage guarantee for them"
         )
     # 同一個 key 同時出現在留下與丟棄兩邊，代表切割根本沒生效（不該發生）
-    assert not (subjects_kept & subjects_dropped), "hash_mod 切割必須以 key 為單位"
+    assert not (subjects_kept & subjects_dropped), "a hash_mod split must keep each key on one side"
     return StepResult(cand, stats, decisions, warnings)
 
 
@@ -417,7 +457,12 @@ def _label_context(catalog: Catalog, cand: CandidateSet) -> dict[int, dict[str, 
     O(影像數 × 標註數)。
     """
     context: dict[int, dict[str, Any]] = {
-        image_id: {"labels": set(), "targets": set(), "annotators": set(), "n_annotations": 0}
+        image_id: {
+            "labels": set(),
+            "targets": set(),
+            "annotators": set(),
+            "n_annotations": 0,
+        }
         for image_id in cand.images
     }
     for kind, pool in (("cls", cand.cls), ("det", cand.det)):
@@ -467,9 +512,12 @@ def _filter_balance(
             by_class[name].append(image_id)
     if not by_class:
         raise SpecError(
-            f"step '{step.id}': 候選集合裡沒有任何"
-            + ("target category（要先做 category_map）" if step.by == "target" else "類別")
-            + "，無法平衡"
+            f"step '{step.id}': nothing to balance — the candidate set has no "
+            + (
+                "target category (run category_map first)"
+                if step.by == "target"
+                else "categories"
+            )
         )
 
     before_counts = {name: len(ids) for name, ids in by_class.items()}
@@ -498,8 +546,8 @@ def _filter_balance(
     if over:
         warnings.append(
             f"step '{step.id}': {', '.join(f'{n}={c}' for n, c in sorted(over.items()))} "
-            f"仍超過上限 {step.max_per_class}——這些類別的影像同時帶有其他類別的標籤，"
-            "留下它們是為了填滿那些類別的配額"
+            f"still exceed the cap of {step.max_per_class}: those images also carry other labels "
+            "and were kept to fill the quotas of those classes"
         )
 
     stats = {
@@ -523,8 +571,7 @@ def _filter_predicate(
     tree = pred.compile_predicate(step.expression)
     context = _label_context(catalog, cand)
     drop = {
-        i for i in cand.images
-        if not pred.evaluate(tree, catalog, i, context.get(i))
+        i for i in cand.images if not pred.evaluate(tree, catalog, i, context.get(i))
     }
     decisions = _drop_images(cand, catalog, drop, "filter:predicate")
     cand.prune(catalog)
@@ -543,15 +590,15 @@ def _filter_explicit_list(
     cand: CandidateSet,
     step: FilterStep,
     before: dict[str, int],
-    file_names: Optional[list[str]] = None,
+    file_names: list[str] | None = None,
 ) -> StepResult:
     """在既有候選集合裡縮限——清單裡的檔名必須已經在 input 的結果中，
     這是它跟 import_list 的差別。"""
     names = file_names if file_names is not None else (step.file_names or [])
     if not names:
         raise SpecError(
-            f"step '{step.id}': file_names_ref 指到的清單是空的"
-            "（engine 應該先從 manual_set_import_lists 取出本體再呼叫）"
+            f"step '{step.id}': the list behind file_names_ref is empty"
+            " (the engine should load it from manual_set_import_lists before calling)"
         )
     wanted = set(names)
     by_name: dict[str, list[int]] = defaultdict(list)
@@ -574,8 +621,8 @@ def _filter_explicit_list(
     warnings: list[str] = []
     if missing:
         msg = (
-            f"step '{step.id}': 清單有 {len(missing)} 筆不在 input '{step.input}' 的結果裡"
-            f"（前幾筆: {', '.join(sorted(missing)[:5])}）"
+            f"step '{step.id}': {len(missing)} names in the list are not in the result of input '{step.input}'"
+            f" (first few: {', '.join(sorted(missing)[:5])})"
         )
         if step.on_missing == "error":
             raise SpecError(msg)
@@ -619,8 +666,12 @@ def find_duplicates(catalog: Catalog, cand: CandidateSet) -> list[dict[str, Any]
         candidates = []
         for image_id in sorted(members):
             meta = catalog.image(image_id)
-            cls_here = sorted(a for a in cand.cls if catalog.cls(a).image_id == image_id)
-            det_here = sorted(a for a in cand.det if catalog.det(a).image_id == image_id)
+            cls_here = sorted(
+                a for a in cand.cls if catalog.cls(a).image_id == image_id
+            )
+            det_here = sorted(
+                a for a in cand.det if catalog.det(a).image_id == image_id
+            )
             candidates.append(
                 {
                     "image_id": image_id,
@@ -630,8 +681,14 @@ def find_duplicates(catalog: Catalog, cand: CandidateSet) -> list[dict[str, Any]
                     "cls_annotation_ids": cls_here,
                     "det_annotation_ids": det_here,
                     "labels": sorted(
-                        {catalog.category(catalog.cls(a).category_id).name for a in cls_here}
-                        | {catalog.category(catalog.det(a).category_id).name for a in det_here}
+                        {
+                            catalog.category(catalog.cls(a).category_id).name
+                            for a in cls_here
+                        }
+                        | {
+                            catalog.category(catalog.det(a).category_id).name
+                            for a in det_here
+                        }
                     ),
                 }
             )
@@ -645,7 +702,9 @@ def find_duplicates(catalog: Catalog, cand: CandidateSet) -> list[dict[str, Any]
     return groups
 
 
-def op_dedup(catalog: Catalog, inputs: list[CandidateSet], step: DedupStep) -> StepResult:
+def op_dedup(
+    catalog: Catalog, inputs: list[CandidateSet], step: DedupStep
+) -> StepResult:
     """依 blake3_hash 去重，同一內容只留優先權最高的來源那一張。
 
     注意：被淘汰那張圖身上的標註也會一起消失，不會改掛到留下來的那張——
@@ -700,8 +759,8 @@ def op_dedup(catalog: Catalog, inputs: list[CandidateSet], step: DedupStep) -> S
         chosen = [i for i in group if i in pinned]
         if len(chosen) > 1:
             raise SpecError(
-                f"step '{step.id}': keep 在同一組重複影像裡指定了 {len(chosen)} 張"
-                f"（{', '.join(catalog.image(i).ref for i in chosen)}）——每組只能留一張"
+                f"step '{step.id}': keep names {len(chosen)} images in the same duplicate group"
+                f" ({', '.join(catalog.image(i).ref for i in chosen)}); keep one per group"
             )
         if chosen:
             manual_groups += 1
@@ -716,19 +775,21 @@ def op_dedup(catalog: Catalog, inputs: list[CandidateSet], step: DedupStep) -> S
             }
 
     cls_before, det_before = len(cand.cls), len(cand.det)
-    decisions = _drop_images(cand, catalog, drop, "dedup:blake3", lambda i: detail.get(i))
+    decisions = _drop_images(
+        cand, catalog, drop, "dedup:blake3", lambda i: detail.get(i)
+    )
     cand.prune(catalog)
 
     warnings: list[str] = []
     lost_annotations = (cls_before - len(cand.cls)) + (det_before - len(cand.det))
     if lost_annotations:
         warnings.append(
-            f"step '{step.id}': 去重連帶移除了 {lost_annotations} 筆掛在重複影像上的標註"
-            "（用 duplicates 看每一組帶了什麼，再用 keep 指定要留哪一張）"
+            f"step '{step.id}': dedup also removed {lost_annotations} annotations attached to duplicate images"
+            " (use duplicates to see what each group carries, then keep to choose the survivor)"
         )
     if no_hash:
         warnings.append(
-            f"step '{step.id}': {no_hash} 張影像沒有 blake3_hash，無法參與去重，全部保留"
+            f"step '{step.id}': {no_hash} images have no blake3_hash and were kept without deduplication"
         )
 
     stats = {
@@ -781,7 +842,9 @@ def op_category_map(
     unknown_locals: list[str] = []
     for scope, table in step.mapping.items():
         scope_categories = {
-            catalog.category(c).name: c for c in present if catalog.category(c).scope == scope
+            catalog.category(c).name: c
+            for c in present
+            if catalog.category(c).scope == scope
         }
         if not scope_categories:
             unknown_scopes.append(scope)
@@ -793,27 +856,32 @@ def op_category_map(
             targets[category_id] = target_name
             decisions.append(
                 Decision(
-                    "category", category_id, "remapped", "category_map",
+                    "category",
+                    category_id,
+                    "remapped",
+                    "category_map",
                     {"scope": scope, "local": local_name, "target": target_name},
                 )
             )
 
-    unmapped = sorted(
-        catalog.category(c).ref for c in present if c not in targets
-    )
+    unmapped = sorted(catalog.category(c).ref for c in present if c not in targets)
     if unmapped and step.require_total:
         raise SpecError(
-            f"step '{step.id}': 還有 {len(unmapped)} 個 local category 沒有映射: "
+            f"step '{step.id}': {len(unmapped)} local categories are not mapped: "
             + ", ".join(unmapped[:10])
             + ("…" if len(unmapped) > 10 else "")
-            + "（要放行請設 require_total: false，未映射的標註會被明確剔除）"
+            + " (to allow it set require_total: false; their annotations are then dropped explicitly)"
         )
 
     warnings: list[str] = []
     if unmapped and step.drop_unmapped:
         unmapped_ids = {c for c in present if c not in targets}
-        dropped_cls = {a for a in cand.cls if catalog.cls(a).category_id in unmapped_ids}
-        dropped_det = {a for a in cand.det if catalog.det(a).category_id in unmapped_ids}
+        dropped_cls = {
+            a for a in cand.cls if catalog.cls(a).category_id in unmapped_ids
+        }
+        dropped_det = {
+            a for a in cand.det if catalog.det(a).category_id in unmapped_ids
+        }
         cand.cls -= dropped_cls
         cand.det -= dropped_det
         for ann_id in dropped_cls:
@@ -825,27 +893,25 @@ def op_category_map(
                 Decision("det_annotation", ann_id, "dropped", "category_map:unmapped")
             )
         warnings.append(
-            f"step '{step.id}': {len(unmapped)} 個 local category 未映射，"
-            f"連帶剔除 {len(dropped_cls) + len(dropped_det)} 筆標註"
+            f"step '{step.id}': {len(unmapped)} local categories are not mapped; "
+            f"dropped their {len(dropped_cls) + len(dropped_det)} annotations"
         )
     # drop_unmapped=False 時「還有幾個沒映射」是**當下的待辦狀態**，不是這一步
     # 做了什麼的事實——後面補上映射它就不成立了。放進 stats 讓 preview 的
     # category 面板即時反映，不當成 step warning 一路累積下去。
     if unknown_scopes:
         warnings.append(
-            f"step '{step.id}': mapping 裡的 {', '.join(unknown_scopes)} "
-            "在候選集合中沒有任何標註，這段映射沒有作用"
+            f"step '{step.id}': mapping scope {', '.join(unknown_scopes)} "
+            "has no annotations in the candidate set, so that mapping does nothing"
         )
     if unknown_locals:
         warnings.append(
-            f"step '{step.id}': mapping 指到不存在／不在候選集合中的 local category: "
+            f"step '{step.id}': mapping names local categories that do not exist or are not in the candidate set: "
             + ", ".join(unknown_locals[:10])
         )
 
     cand.category_targets = targets
-    kept_targets = {
-        targets[c] for c in present if c in targets
-    }
+    kept_targets = {targets[c] for c in present if c in targets}
     stats = {
         "local_categories_present": len(present),
         "mapped": len([c for c in present if c in targets]),
@@ -854,7 +920,8 @@ def op_category_map(
         "target_categories": sorted(kept_targets),
         # target 被宣告卻沒有任何 local 映射過來——通常是打錯字，要顯示出來
         "targets_without_source": sorted(
-            {t for table in step.mapping.values() for t in table.values()} - kept_targets
+            {t for table in step.mapping.values() for t in table.values()}
+            - kept_targets
         ),
         "after": cand.counts(),
     }
@@ -884,7 +951,9 @@ class ConflictGroup:
 
     @property
     def annotation_ids(self) -> list[int]:
-        return sorted(a for src in self.by_source.values() for a in src["annotation_ids"])
+        return sorted(
+            a for src in self.by_source.values() for a in src["annotation_ids"]
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -936,7 +1005,9 @@ def find_conflicts(catalog: Catalog, cand: CandidateSet) -> list[ConflictGroup]:
                 "max_score": max((catalog.cls(a).score or 0.0) for a in ann_ids),
             }
         kind = "duplicate" if len(set(target_sets)) == 1 else "contradiction"
-        groups.append(ConflictGroup(image_id, catalog.image(image_id).ref, kind, by_source))
+        groups.append(
+            ConflictGroup(image_id, catalog.image(image_id).ref, kind, by_source)
+        )
 
     groups.sort(key=lambda g: (g.kind != "contradiction", g.image_id))
     return groups
@@ -956,7 +1027,7 @@ def _pick_winner_batch(
     group: ConflictGroup,
     rule,
     manual_index: dict[int, str],
-) -> tuple[Optional[int], str]:
+) -> tuple[int | None, str]:
     """依單一規則挑出這張影像的勝出 annotation_batch。
 
     挑不出來（規則涵蓋不到、或並列）就回 None，交給下一條規則——
@@ -987,7 +1058,8 @@ def _pick_winner_batch(
     if rule.rule == "batch_version_precedence":
         order = rule.version_precedence or []
         ranked = {
-            batch_id: _rank_by(order, src["batch_version"]) for batch_id, src in batches.items()
+            batch_id: _rank_by(order, src["batch_version"])
+            for batch_id, src in batches.items()
         }
         best = min(ranked.values())
         winners = [b for b, r in ranked.items() if r == best]
@@ -1029,10 +1101,12 @@ def op_conflict_resolve(
                 manual_index[d.keep_annotation_id] = d.reason
 
     for group in groups:
-        winner_batch: Optional[int] = None
+        winner_batch: int | None = None
         winning_rule = ""
         for rule in step.rules:
-            winner_batch, winning_rule = _pick_winner_batch(catalog, group, rule, manual_index)
+            winner_batch, winning_rule = _pick_winner_batch(
+                catalog, group, rule, manual_index
+            )
             if winner_batch is not None:
                 break
 
@@ -1042,7 +1116,9 @@ def op_conflict_resolve(
 
         resolved_by[winning_rule.split(":")[0]] += 1
         winner_source = next(
-            src for src in group.by_source.values() if src["annotation_batch_id"] == winner_batch
+            src
+            for src in group.by_source.values()
+            if src["annotation_batch_id"] == winner_batch
         )
         for source_label, src in group.by_source.items():
             if src["annotation_batch_id"] == winner_batch:
@@ -1051,7 +1127,9 @@ def op_conflict_resolve(
                 drop.add(ann_id)
                 decisions.append(
                     Decision(
-                        "cls_annotation", ann_id, "dropped",
+                        "cls_annotation",
+                        ann_id,
+                        "dropped",
                         f"conflict_resolve:{winning_rule}",
                         {
                             "image": group.image_ref,
@@ -1059,7 +1137,8 @@ def op_conflict_resolve(
                             "lost_source": source_label,
                             "lost_targets": src["targets"],
                             "kept_source": next(
-                                lbl for lbl, s in group.by_source.items()
+                                lbl
+                                for lbl, s in group.by_source.items()
                                 if s["annotation_batch_id"] == winner_batch
                             ),
                             "kept_targets": winner_source["targets"],
@@ -1088,9 +1167,15 @@ def op_conflict_resolve(
             collapsed += 1
             decisions.append(
                 Decision(
-                    "cls_annotation", loser, "dropped", "conflict_resolve:same_target_duplicate",
-                    {"image": catalog.image(image_id).ref, "target_category": target,
-                     "kept_annotation_id": members[0]},
+                    "cls_annotation",
+                    loser,
+                    "dropped",
+                    "conflict_resolve:same_target_duplicate",
+                    {
+                        "image": catalog.image(image_id).ref,
+                        "target_category": target,
+                        "kept_annotation_id": members[0],
+                    },
                 )
             )
 
@@ -1098,9 +1183,9 @@ def op_conflict_resolve(
     if unresolved and step.strict:
         sample = ", ".join(u["image"] for u in unresolved[:5])
         raise SpecError(
-            f"step '{step.id}': 還有 {len(unresolved)} 張影像的衝突沒有任何規則能裁決（{sample}）。"
-            "請補規則或用 rule=manual 個別指定；要放行請設 strict: false"
-            "（未解決的影像會保留所有來源的標註，等於把矛盾原封不動帶進訓練資料）"
+            f"step '{step.id}': {len(unresolved)} images have conflicts no rule could settle ({sample}). "
+            "Add a rule or pick them one by one with rule=manual; to let them through set strict: false"
+            " (unresolved images keep every source's annotations, carrying the contradiction into the training data)"
         )
 
     # 同一張圖有多個 target category：多標籤在 CXR 是合理的，不當衝突處理，
@@ -1130,8 +1215,8 @@ def op_conflict_resolve(
     warnings = []
     if unresolved:
         warnings.append(
-            f"step '{step.id}': {len(unresolved)} 張影像的衝突未解決，"
-            "已保留所有來源的標註（strict=false）——這些矛盾會被帶進訓練資料"
+            f"step '{step.id}': {len(unresolved)} images have unresolved conflicts; "
+            "every source's annotations were kept (strict=false), so the contradictions go into the training data"
         )
     return StepResult(cand, stats, decisions, warnings)
 
@@ -1172,24 +1257,35 @@ def op_manual_override(
             try:
                 meta = catalog.image(ov.image_id)
             except KeyError:
-                failed.append(f"{ov.action} image #{ov.image_id}（資料庫裡沒有這個 image_id）")
+                failed.append(
+                    f"{ov.action} image #{ov.image_id} (no such image_id in the database)"
+                )
                 continue
             if ov.action == "exclude_image":
                 if meta.id not in cand.images:
                     # 靜默成功最糟：你以為排除了，其實它本來就不在
-                    failed.append(f"exclude_image #{meta.id} {meta.ref}（它本來就不在候選集合裡）")
+                    failed.append(
+                        f"exclude_image #{meta.id} {meta.ref} (it was not in the candidate set to begin with)"
+                    )
                     continue
                 decisions += _drop_images(
-                    cand, catalog, {meta.id}, f"manual_override:{ov.reason or 'exclude_image'}"
+                    cand,
+                    catalog,
+                    {meta.id},
+                    f"manual_override:{ov.reason or 'exclude_image'}",
                 )
             else:
                 if meta.id in cand.images:
-                    failed.append(f"include_image #{meta.id} {meta.ref}（它已經在候選集合裡了）")
+                    failed.append(
+                        f"include_image #{meta.id} {meta.ref} (it is already in the candidate set)"
+                    )
                     continue
                 cand.images.add(meta.id)
                 decisions.append(
                     Decision(
-                        "image", meta.id, "overridden",
+                        "image",
+                        meta.id,
+                        "overridden",
                         f"manual_override:{ov.reason or 'include_image'}",
                         {"image": meta.ref},
                     )
@@ -1201,13 +1297,21 @@ def op_manual_override(
                 cand.det |= set(det_ids)
                 for ann_id in cls_ids:
                     decisions.append(
-                        Decision("cls_annotation", ann_id, "overridden",
-                                 f"manual_override:{ov.reason or 'include_image'}")
+                        Decision(
+                            "cls_annotation",
+                            ann_id,
+                            "overridden",
+                            f"manual_override:{ov.reason or 'include_image'}",
+                        )
                     )
                 for ann_id in det_ids:
                     decisions.append(
-                        Decision("det_annotation", ann_id, "overridden",
-                                 f"manual_override:{ov.reason or 'include_image'}")
+                        Decision(
+                            "det_annotation",
+                            ann_id,
+                            "overridden",
+                            f"manual_override:{ov.reason or 'include_image'}",
+                        )
                     )
             applied[ov.action] += 1
             continue
@@ -1217,38 +1321,49 @@ def op_manual_override(
         ann_id = int(ov.annotation_id or 0)
         if ov.action == "exclude_annotation":
             if ann_id not in pool:
-                failed.append(f"exclude_annotation {ann_id}（不在候選集合裡）")
+                failed.append(f"exclude_annotation {ann_id} (not in the candidate set)")
                 continue
             pool.discard(ann_id)
             decisions.append(
-                Decision(kind, ann_id, "overridden", f"manual_override:{ov.reason or 'exclude'}")
+                Decision(
+                    kind,
+                    ann_id,
+                    "overridden",
+                    f"manual_override:{ov.reason or 'exclude'}",
+                )
             )
         else:
             try:
                 ann = catalog.annotation(ov.annotation_kind, ann_id)
             except KeyError:
-                failed.append(f"include_annotation {ann_id}（catalog 沒載到這筆標註）")
+                failed.append(f"include_annotation {ann_id} (the catalog did not load this annotation)")
                 continue
             if ann.image_id not in cand.images:
                 # 標註納入時對應影像必須先在集合裡——這是 schema 的複合外鍵，
                 # 這裡先擋掉，比等到 commit 才炸掉好懂得多
                 failed.append(
-                    f"include_annotation {ann_id}（它的影像 "
-                    f"{catalog.image(ann.image_id).ref} 不在候選集合裡）"
+                    f"include_annotation {ann_id} (its image "
+                    f"{catalog.image(ann.image_id).ref} is not in the candidate set)"
                 )
                 continue
             if ann_id in pool:
-                failed.append(f"include_annotation {ann_id}（它已經在候選集合裡了）")
+                failed.append(f"include_annotation {ann_id} (it is already in the candidate set)")
                 continue
             pool.add(ann_id)
             decisions.append(
-                Decision(kind, ann_id, "overridden", f"manual_override:{ov.reason or 'include'}")
+                Decision(
+                    kind,
+                    ann_id,
+                    "overridden",
+                    f"manual_override:{ov.reason or 'include'}",
+                )
             )
         applied[ov.action] += 1
 
     if failed:
         raise SpecError(
-            f"step '{step.id}': {len(failed)} 筆 override 無法套用: " + "; ".join(failed[:5])
+            f"step '{step.id}': {len(failed)} overrides could not be applied: "
+            + "; ".join(failed[:5])
         )
 
     cand.prune(catalog)
@@ -1262,11 +1377,15 @@ def op_manual_override(
     if orphaned and any(o.action == "exclude_annotation" for o in step.overrides):
         sample = ", ".join(catalog.image(i).ref for i in orphaned[:3])
         raise SpecError(
-            f"step '{step.id}': 剔除標註後有 {len(orphaned)} 張影像沒有任何標籤了"
-            f"（{sample}）。manual-set 不接受沒標註的影像——"
-            "請一併 exclude_image 把它們排除。"
+            f"step '{step.id}': excluding those annotations leaves {len(orphaned)} images with no label"
+            f" ({sample}). A manual-set does not accept unannotated images — "
+            "exclude those images with exclude_image as well."
         )
-    stats = {"applied": dict(applied), "override_count": len(step.overrides), **cand.counts()}
+    stats = {
+        "applied": dict(applied),
+        "override_count": len(step.overrides),
+        **cand.counts(),
+    }
     return StepResult(cand, stats, decisions)
 
 

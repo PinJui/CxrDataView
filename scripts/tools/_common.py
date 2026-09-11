@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # 讓腳本可以直接 python scripts/tools/xxx.py 執行
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from rich.console import Console  # noqa: E402
-from rich.table import Table  # noqa: E402
+from rich.console import Console
+from rich.table import Table
 
 console = Console()
 
@@ -54,7 +54,7 @@ def cell(row, column: str, default: Any = None) -> Any:
     return value
 
 
-def clean_date(value: Any) -> Optional[str]:
+def clean_date(value: Any) -> str | None:
     """規格用 '0000-00-00' 當未知，資料庫用 NULL。"""
     if value is None:
         return None
@@ -64,7 +64,7 @@ def clean_date(value: Any) -> Optional[str]:
     return text[:10]
 
 
-def clean_hash(value: Any) -> Optional[str]:
+def clean_hash(value: Any) -> str | None:
     """blake3_hash 有 CHECK (^[0-9a-f]{64}$)，不合格就當作沒有。
 
     寧可留 NULL 也不要寫入一個會讓整批 INSERT 失敗的值——

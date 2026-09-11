@@ -7,8 +7,8 @@ from sqlalchemy import text
 
 from cxr_dataset_manager.core.engine import Author, execute_spec
 from cxr_dataset_manager.core.schema import BuildSpec
-from cxr_dataset_manager.db import crud
 from cxr_dataset_manager.core.types import Catalog, SpecError
+from cxr_dataset_manager.db import crud
 from cxr_dataset_manager.session.builder import ManualSetSession
 
 
@@ -93,8 +93,10 @@ def test_import_report_lets_you_fix_the_whole_list_at_once(session, catalog):
     batch = catalog.resolve_image_batch("DrLee", "V1")
     names = [catalog.image(i).file_name for i in catalog.load_image_batch(batch)[:3]]
     session.import_list(
-        original_set="DrLee", image_batch="V1",
-        file_names=names + ["ghost_a.png", "ghost_b.png"], on_missing="warn",
+        original_set="DrLee",
+        image_batch="V1",
+        file_names=names + ["ghost_a.png", "ghost_b.png"],
+        on_missing="warn",
     )
     report = session.last_import_report()
     assert report.matched_count == 3
@@ -105,8 +107,12 @@ def test_a_failed_step_leaves_the_session_usable(session):
     session.add_source(original_set="aws_images", annotation_batch="V1")
     good = len(session.steps)
     with pytest.raises(SpecError):
-        session.import_list(original_set="DrLee", image_batch="V1",
-                            file_names=["ghost.png"], on_missing="error")
+        session.import_list(
+            original_set="DrLee",
+            image_batch="V1",
+            file_names=["ghost.png"],
+            on_missing="error",
+        )
     assert len(session.steps) == good, "打錯一個參數不該把整個 session 弄壞"
     session.split(mod=2, keep_remainder=[0], seed="still-works")
     assert session.head is not None
@@ -164,7 +170,7 @@ def test_undo_refuses_to_break_a_dependency(session):
     session.split(mod=2, keep_remainder=[0], seed="s")
     session.checkout("source_1")
 
-    with pytest.raises(SpecError, match="還被 filter_1 當成 input"):
+    with pytest.raises(SpecError, match="still used as input by filter_1"):
         session.undo()
     assert len(session.steps) == 2
 

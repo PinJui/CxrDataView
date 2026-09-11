@@ -12,14 +12,14 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cxr_dataset_manager.db import models as m
-
 
 # ---------------------------------------------------------------------------
 # 唯讀 metadata
@@ -36,9 +36,9 @@ class ImageMeta:
     file_name: str
     width: int
     height: int
-    blake3_hash: Optional[str]
-    date_captured: Optional[dt.date]
-    subject_id: Optional[str]
+    blake3_hash: str | None
+    date_captured: dt.date | None
+    subject_id: str | None
 
     @property
     def ref(self) -> str:
@@ -55,7 +55,7 @@ class CategoryMeta:
     id: int
     annotation_batch_id: int
     name: str
-    supercategory: Optional[str]
+    supercategory: str | None
     original_set_name: str
     batch_version: str
 
@@ -78,10 +78,10 @@ class AnnotationMeta:
     category_id: int
     annotator_id: int
     annotator_name: str
-    score: Optional[float]
+    score: float | None
     original_set_name: str
     batch_version: str
-    bbox: Optional[tuple[float, float, float, float]] = None
+    bbox: tuple[float, float, float, float] | None = None
     iscrowd: int = 0
 
     @property
@@ -110,7 +110,7 @@ class CandidateSet:
     # local category_id -> target category name（design_doc §3 顯式映射）
     category_targets: dict[int, str] = field(default_factory=dict)
 
-    def copy(self) -> "CandidateSet":
+    def copy(self) -> CandidateSet:
         return CandidateSet(
             images=set(self.images),
             cls=set(self.cls),
@@ -121,13 +121,13 @@ class CandidateSet:
     def counts(self) -> dict[str, int]:
         return {"images": len(self.images), "cls": len(self.cls), "det": len(self.det)}
 
-    def prune(self, catalog: "Catalog") -> "CandidateSet":
+    def prune(self, catalog: Catalog) -> CandidateSet:
         """丟掉 image 已不在集合內的 annotation，維持上面的不變條件。"""
         self.cls = {a for a in self.cls if catalog.cls(a).image_id in self.images}
         self.det = {a for a in self.det if catalog.det(a).image_id in self.images}
         return self
 
-    def orphan_annotations(self, catalog: "Catalog") -> tuple[set[int], set[int]]:
+    def orphan_annotations(self, catalog: Catalog) -> tuple[set[int], set[int]]:
         return (
             {a for a in self.cls if catalog.cls(a).image_id not in self.images},
             {a for a in self.det if catalog.det(a).image_id not in self.images},
@@ -146,7 +146,7 @@ class Decision:
     entity_id: int
     decision: str  # added | dropped | remapped | overridden | missing
     reason: str
-    detail: Optional[dict[str, Any]] = None
+    detail: dict[str, Any] | None = None
 
 
 @dataclass
@@ -196,17 +196,19 @@ class Catalog:
             .where(m.OriginalSet.name == original_set, m.ImageBatch.version == version)
         ).scalar_one_or_none()
         if row is None:
-            raise SpecError(f"找不到 image_batch: {original_set}@{version}")
+            raise SpecError(f"image_batch not found: {original_set}@{version}")
         return row
 
     def resolve_annotation_batch(self, original_set: str, version: str) -> int:
         row = self.db.execute(
             select(m.AnnotationBatch.id)
             .join(m.OriginalSet, m.OriginalSet.id == m.AnnotationBatch.original_set_id)
-            .where(m.OriginalSet.name == original_set, m.AnnotationBatch.version == version)
+            .where(
+                m.OriginalSet.name == original_set, m.AnnotationBatch.version == version
+            )
         ).scalar_one_or_none()
         if row is None:
-            raise SpecError(f"找不到 annotation_batch: {original_set}@{version}")
+            raise SpecError(f"annotation_batch not found: {original_set}@{version}")
         return row
 
     # -- 載入 --------------------------------------------------------------
@@ -256,11 +258,15 @@ class Catalog:
 
     def load_annotation_batch(self, batch_id: int) -> tuple[list[int], list[int]]:
         if batch_id in self._loaded_annotation_batches:
-            return self._cls_by_batch.get(batch_id, []), self._det_by_batch.get(batch_id, [])
+            return self._cls_by_batch.get(batch_id, []), self._det_by_batch.get(
+                batch_id, []
+            )
 
         src = self.db.execute(
             select(m.OriginalSet.name, m.AnnotationBatch.version)
-            .join(m.AnnotationBatch, m.AnnotationBatch.original_set_id == m.OriginalSet.id)
+            .join(
+                m.AnnotationBatch, m.AnnotationBatch.original_set_id == m.OriginalSet.id
+            )
             .where(m.AnnotationBatch.id == batch_id)
         ).one()
         set_name, version = src
@@ -326,7 +332,10 @@ class Catalog:
 
         # 標註指向的影像可能屬於別的 image_batch（annotation_batch 與
         # image_batch 是兩條獨立的版本軸），把它們一併載進來。
-        self.ensure_images({self._cls[i].image_id for i in cls_ids} | {self._det[i].image_id for i in det_ids})
+        self.ensure_images(
+            {self._cls[i].image_id for i in cls_ids}
+            | {self._det[i].image_id for i in det_ids}
+        )
 
         self._loaded_annotation_batches.add(batch_id)
         return cls_ids, det_ids
@@ -365,7 +374,9 @@ class Catalog:
             det_ids += [a for a in batch_det if self.det(a).image_id in wanted]
         return cls_ids, det_ids
 
-    def annotation_batches_of(self, annotation_ids: Iterable[int], kind: str) -> set[str]:
+    def annotation_batches_of(
+        self, annotation_ids: Iterable[int], kind: str
+    ) -> set[str]:
         pool = self._cls if kind == "cls" else self._det
         return {pool[a].source for a in annotation_ids if a in pool}
 
@@ -421,7 +432,9 @@ class Catalog:
         model = m.ClsAnnotation if kind == "cls" else m.DetAnnotation
         batch_ids = set(
             self.db.execute(
-                select(model.annotation_batch_id).where(model.id.in_(missing)).distinct()
+                select(model.annotation_batch_id)
+                .where(model.id.in_(missing))
+                .distinct()
             ).scalars()
         )
         for batch_id in sorted(batch_ids):
@@ -433,7 +446,10 @@ class Catalog:
             return
         rows = self.db.execute(
             select(m.Category, m.OriginalSet.name, m.AnnotationBatch.version)
-            .join(m.AnnotationBatch, m.AnnotationBatch.id == m.Category.annotation_batch_id)
+            .join(
+                m.AnnotationBatch,
+                m.AnnotationBatch.id == m.Category.annotation_batch_id,
+            )
             .join(m.OriginalSet, m.OriginalSet.id == m.AnnotationBatch.original_set_id)
             .where(m.Category.id.in_(missing))
         ).all()
@@ -468,7 +484,9 @@ class Catalog:
             self.ensure_categories([category_id])
         return self._categories[category_id]
 
-    def annotations_of_image(self, image_id: int, kind: str = "cls") -> list[AnnotationMeta]:
+    def annotations_of_image(
+        self, image_id: int, kind: str = "cls"
+    ) -> list[AnnotationMeta]:
         pool = self._cls if kind == "cls" else self._det
         return [a for a in pool.values() if a.image_id == image_id]
 
@@ -480,7 +498,7 @@ class Catalog:
 
     def find_image_by_file_name(
         self, original_set: str, batch_version: str, file_name: str
-    ) -> Optional[ImageMeta]:
+    ) -> ImageMeta | None:
         for meta in self._images.values():
             if (
                 meta.original_set_name == original_set

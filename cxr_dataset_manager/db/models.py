@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import (
     ARRAY,
-    BigInteger,
     CHAR,
+    BigInteger,
     CheckConstraint,
     Date,
     DateTime,
@@ -23,7 +23,6 @@ from sqlalchemy import (
     Integer,
     Numeric,
     SmallInteger,
-    String,
     Text,
     UniqueConstraint,
     func,
@@ -50,10 +49,10 @@ class OriginalSet(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    image_batches: Mapped[list["ImageBatch"]] = relationship(
+    image_batches: Mapped[list[ImageBatch]] = relationship(
         back_populates="original_set", cascade="all, delete-orphan"
     )
-    annotation_batches: Mapped[list["AnnotationBatch"]] = relationship(
+    annotation_batches: Mapped[list[AnnotationBatch]] = relationship(
         back_populates="original_set", cascade="all, delete-orphan"
     )
 
@@ -72,7 +71,7 @@ class ImageBatch(Base):
     )
 
     original_set: Mapped[OriginalSet] = relationship(back_populates="image_batches")
-    images: Mapped[list["Image"]] = relationship(
+    images: Mapped[list[Image]] = relationship(
         back_populates="image_batch", cascade="all, delete-orphan"
     )
 
@@ -90,8 +89,10 @@ class AnnotationBatch(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    original_set: Mapped[OriginalSet] = relationship(back_populates="annotation_batches")
-    categories: Mapped[list["Category"]] = relationship(
+    original_set: Mapped[OriginalSet] = relationship(
+        back_populates="annotation_batches"
+    )
+    categories: Mapped[list[Category]] = relationship(
         back_populates="annotation_batch", cascade="all, delete-orphan"
     )
 
@@ -103,7 +104,7 @@ class License(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    url: Mapped[Optional[str]] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(Text)
 
 
 class Image(Base):
@@ -125,14 +126,14 @@ class Image(Base):
     file_name: Mapped[str] = mapped_column(Text, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     width: Mapped[int] = mapped_column(Integer, nullable=False)
-    blake3_hash: Mapped[Optional[str]] = mapped_column(CHAR(64))
-    license_id: Mapped[Optional[int]] = mapped_column(
+    blake3_hash: Mapped[str | None] = mapped_column(CHAR(64))
+    license_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("licenses.id", ondelete="RESTRICT")
     )
-    date_captured: Mapped[Optional[dt.date]] = mapped_column(Date)
+    date_captured: Mapped[dt.date | None] = mapped_column(Date)
 
     image_batch: Mapped[ImageBatch] = relationship(back_populates="images")
-    subject: Mapped[Optional["ImageSubject"]] = relationship(
+    subject: Mapped[ImageSubject | None] = relationship(
         back_populates="image", uselist=False, cascade="all, delete-orphan"
     )
 
@@ -171,12 +172,16 @@ class Category(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     annotation_batch_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("annotation_batches.id", ondelete="CASCADE"), nullable=False
+        BigInteger,
+        ForeignKey("annotation_batches.id", ondelete="CASCADE"),
+        nullable=False,
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    supercategory: Mapped[Optional[str]] = mapped_column(Text)
+    supercategory: Mapped[str | None] = mapped_column(Text)
 
-    annotation_batch: Mapped[AnnotationBatch] = relationship(back_populates="categories")
+    annotation_batch: Mapped[AnnotationBatch] = relationship(
+        back_populates="categories"
+    )
 
 
 class ClsAnnotation(Base):
@@ -226,8 +231,14 @@ class DetAnnotation(Base):
         # 視為互不相同——正好會放過最容易重複的那種列（沒有分數也沒有遮罩的
         # 框），所以要 postgresql_nulls_not_distinct。
         UniqueConstraint(
-            "annotation_batch_id", "image_id", "category_id", "annotator_id",
-            "score", "bbox", "segmentation", "iscrowd",
+            "annotation_batch_id",
+            "image_id",
+            "category_id",
+            "annotator_id",
+            "score",
+            "bbox",
+            "segmentation",
+            "iscrowd",
             postgresql_nulls_not_distinct=True,
         ),
         Index("idx_det_annotations_batch", "annotation_batch_id"),
@@ -243,9 +254,11 @@ class DetAnnotation(Base):
     )
     category_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     bbox: Mapped[list[Decimal]] = mapped_column(ARRAY(Numeric), nullable=False)
-    segmentation: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB)
-    iscrowd: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0")
-    score: Mapped[Optional[Decimal]] = mapped_column(Numeric)
+    segmentation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    iscrowd: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default="0"
+    )
+    score: Mapped[Decimal | None] = mapped_column(Numeric)
     annotator_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("annotators.id", ondelete="RESTRICT"), nullable=False
     )
@@ -265,7 +278,7 @@ class ManualSet(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    versions: Mapped[list["ManualSetVersion"]] = relationship(
+    versions: Mapped[list[ManualSetVersion]] = relationship(
         back_populates="manual_set", cascade="all, delete-orphan"
     )
 
@@ -286,7 +299,7 @@ class ManualSetVersion(Base):
     # spec 本體在物件儲存（manual-sets/{name}/annotations/{version}/spec.yaml），
     # 這裡只留指紋——用來判斷兩個版本是不是同一份配方，以及偵測 spec.yaml
     # 事後被改過或不見了。NULL 表示這版本是匯入的，本來就沒有 spec。
-    spec_sha256: Mapped[Optional[str]] = mapped_column(CHAR(64))
+    spec_sha256: Mapped[str | None] = mapped_column(CHAR(64))
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -373,7 +386,9 @@ class ManualSetTargetCategory(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     manual_set_version_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("manual_set_versions.id", ondelete="CASCADE"), nullable=False
+        BigInteger,
+        ForeignKey("manual_set_versions.id", ondelete="CASCADE"),
+        nullable=False,
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -430,7 +445,7 @@ class ManualSetImportList(Base):
 
     sha256: Mapped[str] = mapped_column(CHAR(64), primary_key=True)
     file_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    source_note: Mapped[Optional[str]] = mapped_column(Text)
+    source_note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

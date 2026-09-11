@@ -21,7 +21,9 @@ from cxr_dataset_manager.db import crud
 def shell(db):
     sh = ExploreShell(name=f"pytest_{uuid.uuid4().hex[:8]}")
     yield sh
-    sh.db.execute(text("DELETE FROM manual_sets WHERE name = :n"), {"n": sh.session.name})
+    sh.db.execute(
+        text("DELETE FROM manual_sets WHERE name = :n"), {"n": sh.session.name}
+    )
     sh.db.commit()
     sh.db.close()
 
@@ -54,24 +56,38 @@ def test_unknown_source_is_reported_not_crashed(shell):
 
 
 def test_split_parses_its_options(shell):
-    run(shell, "source aws_images@V1 --image",
-        "split --mod 4 --keep 0,1,2 --seed my-seed --key subject_id")
+    run(
+        shell,
+        "source aws_images@V1 --image",
+        "split --mod 4 --keep 0,1,2 --seed my-seed --key subject_id",
+    )
     step = shell.session.steps[-1]
     assert (step.mod, step.keep_remainder, step.seed) == (4, [0, 1, 2], "my-seed")
     assert step.key_field == "subject_id"
 
 
 def test_map_parses_key_value_pairs(shell):
-    run(shell, "source aws_images@V1 --annotation",
-        "map aws_images@V1 Pneumonia=pneumonia Normal=normal Effusion=effusion")
+    run(
+        shell,
+        "source aws_images@V1 --annotation",
+        "map aws_images@V1 Pneumonia=pneumonia Normal=normal Effusion=effusion",
+    )
     assert shell.session.steps[-1].mapping == {
-        "aws_images@V1": {"Pneumonia": "pneumonia", "Normal": "normal", "Effusion": "effusion"}
+        "aws_images@V1": {
+            "Pneumonia": "pneumonia",
+            "Normal": "normal",
+            "Effusion": "effusion",
+        }
     }
 
 
 def test_dedup_parses_source_priority(shell):
     run(shell, "source aws_images@V1 --image", "dedup TB-portal, DrLee ,aws_images")
-    assert shell.session.steps[-1].source_priority == ["TB-portal", "DrLee", "aws_images"]
+    assert shell.session.steps[-1].source_priority == [
+        "TB-portal",
+        "DrLee",
+        "aws_images",
+    ]
 
 
 def test_a_bad_command_leaves_the_session_intact(shell):
@@ -139,21 +155,36 @@ def test_load_resumes_an_existing_spec(shell, tmp_path):
 
 
 def test_commit_from_the_repl_creates_a_version(shell, db):
-    run(shell, "source TB-portal@V1 --annotation", "merge_identical",
+    run(
+        shell,
+        "source TB-portal@V1 --annotation",
+        "merge_identical",
         f"commit -m {shell.session.name} -v V1"
-        " --author-name pytest --author-email pytest@example.com")
+        " --author-name pytest --author-email pytest@example.com",
+    )
     from cxr_dataset_manager.db import crud
 
     version_id = crud.resolve_version(db, shell.session.name, "V1")
     assert version_id is not None
     assert crud.version_summary(db, version_id)["images"] > 0
 
+    # the commit writes the version's __meta__.md beside its spec
+    from cxr_dataset_manager.storage import get_store
+
+    md = get_store().get_meta("manual-set", shell.session.name, "V1")
+    assert md and "| TB-portal | V1 |" in md
+    get_store().delete_meta("manual-set", shell.session.name, "V1")
+
 
 def test_dry_run_commit_from_the_repl_writes_nothing(shell, db):
     from cxr_dataset_manager.db import crud
 
-    run(shell, "source TB-portal@V1 --annotation", "merge_identical",
-        f"commit -m {shell.session.name} -v V1 --dry-run")
+    run(
+        shell,
+        "source TB-portal@V1 --annotation",
+        "merge_identical",
+        f"commit -m {shell.session.name} -v V1 --dry-run",
+    )
     assert crud.resolve_version(db, shell.session.name, "V1") is None
 
 
@@ -182,8 +213,13 @@ def test_checkout_rejects_an_unknown_step(shell):
 
 def test_resolve_manual_keeps_the_annotation_you_name(shell):
     """conflicts 印出 annotation id，resolve manual 就用那個 id 指定留哪一筆。"""
-    run(shell, "source aws_images@V1 --annotation", "source aws_images@V2 --annotation",
-        "union", "merge_identical")
+    run(
+        shell,
+        "source aws_images@V1 --annotation",
+        "source aws_images@V2 --annotation",
+        "union",
+        "merge_identical",
+    )
     conflicts = shell.session.find_conflicts()
     assert conflicts, "測試前提：要有衝突"
 
@@ -200,8 +236,13 @@ def test_resolve_manual_keeps_the_annotation_you_name(shell):
 
 def test_conflicts_prints_annotation_ids(shell, capsys):
     """沒有 id 就沒東西可以指定給 resolve manual。"""
-    run(shell, "source aws_images@V1 --annotation", "source aws_images@V2 --annotation",
-        "union", "merge_identical")
+    run(
+        shell,
+        "source aws_images@V1 --annotation",
+        "source aws_images@V2 --annotation",
+        "union",
+        "merge_identical",
+    )
     capsys.readouterr()
     run(shell, "conflicts 1")
     out = capsys.readouterr().out
@@ -233,7 +274,10 @@ def test_tab_is_actually_bound_on_both_readline_backends(shell, monkeypatch):
     issued: list[str] = []
     monkeypatch.setattr(readline, "parse_and_bind", issued.append)
 
-    for backend, expected in [("editline", "bind ^I rl_complete"), ("readline", "tab: complete")]:
+    for backend, expected in [
+        ("editline", "bind ^I rl_complete"),
+        ("readline", "tab: complete"),
+    ]:
         issued.clear()
         monkeypatch.setattr(readline, "backend", backend, raising=False)
         shell.preloop()
@@ -254,9 +298,14 @@ def test_tab_is_actually_bound_on_both_readline_backends(shell, monkeypatch):
 def test_steps_marks_the_head_and_the_open_branch_tips(shell, capsys):
     """切換分支之後 head 會停在中間，而未合併的末端才是 union 會抓的東西——
     兩者是不同的資訊，要分別標出來。"""
-    run(shell, "source aws_images@V1 --annotation", "split --mod 2 --keep 0 --seed a",
-        "source DrLee@V1 --annotation", "split --mod 2 --keep 1 --seed b",
-        "checkout filter_1")
+    run(
+        shell,
+        "source aws_images@V1 --annotation",
+        "split --mod 2 --keep 0 --seed a",
+        "source DrLee@V1 --annotation",
+        "split --mod 2 --keep 1 --seed b",
+        "checkout filter_1",
+    )
 
     described = {r["step_id"]: r for r in shell.session.describe()}
     assert described["filter_1"]["head"] and not described["filter_2"]["head"]
@@ -267,8 +316,8 @@ def test_steps_marks_the_head_and_the_open_branch_tips(shell, capsys):
     capsys.readouterr()
     run(shell, "steps")
     out = capsys.readouterr().out
-    assert "← head" in out and "末端" in out
-    assert "2 條分支還沒合併" in out
+    assert "← head" in out and "BRANCH END" in out
+    assert "2 branches not merged yet" in out
 
 
 def test_save_without_a_filename_goes_to_a_temp_file(shell, capsys):
@@ -278,7 +327,7 @@ def test_save_without_a_filename_goes_to_a_temp_file(shell, capsys):
 
     run(shell, "source aws_images@V1 --annotation", "save")
     out = capsys.readouterr().out
-    match = re.search(r"已存到 (\S+\.yaml)", out)
+    match = re.search(r"saved to (\S+\.yaml)", out)
     assert match, out
 
     path = Path(match.group(1))
@@ -304,7 +353,9 @@ def test_load_accepts_a_version_ref_not_just_a_file(shell, db, tmp_path):
         "                                 Effusion: effusion}}}\n"
         "final: mapped\n"
     )
-    build(db, spec, name, "V1", author=Author(name="pytest", email="pytest@example.com"))
+    build(
+        db, spec, name, "V1", author=Author(name="pytest", email="pytest@example.com")
+    )
     try:
         # 解析器拿回來的必須跟當初存進去的是同一份
         assert crud.load_spec_from(db, f"{name}@V1").sha256() == spec.sha256()
@@ -332,11 +383,13 @@ def test_load_refuses_a_minio_storage_directory_and_says_what_to_do(shell, tmp_p
         shell.session  # 觸發 fixture
         crud.load_spec_from(shell.db, str(obj))
     message = str(caught.value)
-    assert "MinIO" in message and "<manual-set>@<版本>" in message
+    assert "MinIO" in message and "<manual-set>@<version>" in message
 
 
 def test_a_missing_object_path_suggests_the_ref_form(shell):
     """指向物件儲存的路徑但檔案不在時，提示改用 ref，而不是只說找不到。"""
     with pytest.raises(SpecError) as caught:
-        crud.load_spec_from(shell.db, "/data/minio/manual-sets/m/annotations/V1/spec.yaml")
-    assert "<manual-set>@<版本>" in str(caught.value)
+        crud.load_spec_from(
+            shell.db, "/data/minio/manual-sets/m/annotations/V1/spec.yaml"
+        )
+    assert "<manual-set>@<version>" in str(caught.value)

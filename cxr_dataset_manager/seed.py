@@ -12,13 +12,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
-import math
 import random
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Optional
 
 import blake3
 from PIL import Image as PILImage
@@ -64,8 +61,13 @@ def synth_cxr(seed: int, size: int = IMAGE_SIZE) -> bytes:
     # 肋骨
     for i in range(7):
         y = cy - size * 0.26 + i * size * 0.08
-        draw.arc([cx - size * 0.40, y - size * 0.12, cx + size * 0.40, y + size * 0.12],
-                 start=200, end=340, fill=95, width=2)
+        draw.arc(
+            [cx - size * 0.40, y - size * 0.12, cx + size * 0.40, y + size * 0.12],
+            start=200,
+            end=340,
+            fill=95,
+            width=2,
+        )
     # 每張圖獨有的雜訊紋理，確保不同 seed 的 blake3 一定不同
     px = img.load()
     for _ in range(size * 12):
@@ -88,13 +90,15 @@ class ImageSpec:
     file_name: str
     payload: bytes
     blake3_hash: str
-    subject_id: Optional[str]
-    date_captured: Optional[date]
-    license_name: Optional[str]
+    subject_id: str | None
+    date_captured: date | None
+    license_name: str | None
 
 
 class Seeder:
-    def __init__(self, db: Session, store: Optional[ObjectStore] = None, seed: int = 20260907):
+    def __init__(
+        self, db: Session, store: ObjectStore | None = None, seed: int = 20260907
+    ):
         self.db = db
         self.store = store
         self.rng = random.Random(seed)
@@ -138,7 +142,7 @@ class Seeder:
         images_per_subject: int = 2,
         missing_subject_rate: float = 0.08,
         start_date: date = date(2021, 1, 1),
-        license_name: Optional[str] = "CC BY-SA 4.0",
+        license_name: str | None = "CC BY-SA 4.0",
     ) -> list[ImageSpec]:
         specs: list[ImageSpec] = []
         subject_counter = 0
@@ -187,7 +191,10 @@ class Seeder:
                 height=IMAGE_SIZE,
                 blake3_hash=spec.blake3_hash,
                 license_id=(
-                    self.license(spec.license_name, "https://creativecommons.org/licenses/by-sa/4.0/").id
+                    self.license(
+                        spec.license_name,
+                        "https://creativecommons.org/licenses/by-sa/4.0/",
+                    ).id
                     if spec.license_name
                     else None
                 ),
@@ -199,7 +206,9 @@ class Seeder:
 
         for image, spec in zip(images, specs):
             if spec.subject_id:
-                self.db.add(m.ImageSubject(image_id=image.id, subject_id=spec.subject_id))
+                self.db.add(
+                    m.ImageSubject(image_id=image.id, subject_id=spec.subject_id)
+                )
             if self.store is not None:
                 self.store.put(
                     object_key_for_image(original_set.name, version, spec.file_name),
@@ -221,9 +230,9 @@ class Seeder:
         annotator_name: str,
         *,
         coverage: float = 1.0,
-        label_bias: Optional[dict[str, float]] = None,
+        label_bias: dict[str, float] | None = None,
         with_det: bool = False,
-        det_categories: Optional[list[str]] = None,
+        det_categories: list[str] | None = None,
         label_seed: int = 0,
     ) -> m.AnnotationBatch:
         batch = m.AnnotationBatch(original_set_id=original_set.id, version=version)
@@ -235,7 +244,9 @@ class Seeder:
             row = m.Category(
                 annotation_batch_id=batch.id,
                 name=name,
-                supercategory="finding" if name.lower() not in ("normal", "norm") else "normal",
+                supercategory="finding"
+                if name.lower() not in ("normal", "norm")
+                else "normal",
             )
             self.db.add(row)
             categories[name] = row
@@ -270,7 +281,11 @@ class Seeder:
                 )
             )
 
-            if with_det and name in (det_categories or category_names) and rng.random() < 0.6:
+            if (
+                with_det
+                and name in (det_categories or category_names)
+                and rng.random() < 0.6
+            ):
                 w = rng.uniform(0.12, 0.30) * IMAGE_SIZE
                 h = rng.uniform(0.12, 0.30) * IMAGE_SIZE
                 x = rng.uniform(0.05, 0.95 - w / IMAGE_SIZE) * IMAGE_SIZE
@@ -288,7 +303,9 @@ class Seeder:
                 )
 
         missing = set(category_names) - used
-        assert not missing, f"category {missing} 沒有任何引用，會被 dangling trigger 擋下"
+        assert not missing, (
+            f"category {missing} is referenced by nothing and would be rejected by the dangling trigger"
+        )
         self.db.flush()
         return batch
 
@@ -298,7 +315,9 @@ class Seeder:
 # ---------------------------------------------------------------------------
 
 
-def seed_demo(db: Session, store: Optional[ObjectStore] = None, verbose: bool = True) -> dict:
+def seed_demo(
+    db: Session, store: ObjectStore | None = None, verbose: bool = True
+) -> dict:
     """建出四個 original-set，彼此有內容重複、標註矛盾、命名不一致。"""
     s = Seeder(db, store)
     log = print if verbose else (lambda *a, **k: None)
@@ -321,21 +340,31 @@ def seed_demo(db: Session, store: Optional[ObjectStore] = None, verbose: bool = 
     #   630-809    DrLee 專有
     #   900-939    aws_images 與 DrLee 共有的 40 張（跨來源重複）
     #   940-959    indo_vnn 與 TB-portal 共有的 20 張
-    aws_content = list(range(0, 300)) + list(range(900, 940))
+    aws_content = list(range(300)) + list(range(900, 940))
     # aws 自己批次內也有 8 張重複（同一份 bytes 收了兩次，不同檔名）
     aws_content += aws_content[:8]
     indo_content = list(range(300, 480)) + list(range(940, 960))
     tb_content = list(range(480, 630)) + list(range(940, 960))
     drlee_content = list(range(630, 810)) + list(range(900, 940))
 
-    log("產生合成影像與 metadata…")
+    log("generating synthetic images and metadata…")
     aws_specs = s.make_image_specs("AWS", aws_content, subject_prefix="AWS-SUBJ")
-    indo_specs = s.make_image_specs("IDN", indo_content, subject_prefix="IDN-SUBJ",
-                                    missing_subject_rate=0.15)
-    tb_specs = s.make_image_specs("TBP", tb_content, subject_prefix="TBP-SUBJ",
-                                  license_name="TB-Portal Research License")
-    drlee_specs = s.make_image_specs("DL", drlee_content, subject_prefix="DL-SUBJ",
-                                     missing_subject_rate=0.02, start_date=date(2023, 1, 1))
+    indo_specs = s.make_image_specs(
+        "IDN", indo_content, subject_prefix="IDN-SUBJ", missing_subject_rate=0.15
+    )
+    tb_specs = s.make_image_specs(
+        "TBP",
+        tb_content,
+        subject_prefix="TBP-SUBJ",
+        license_name="TB-Portal Research License",
+    )
+    drlee_specs = s.make_image_specs(
+        "DL",
+        drlee_content,
+        subject_prefix="DL-SUBJ",
+        missing_subject_rate=0.02,
+        start_date=date(2023, 1, 1),
+    )
 
     aws_v1, aws_images = s.add_image_batch(aws, "V1", aws_specs)
     indo_v1, indo_images = s.add_image_batch(indo, "V1", indo_specs)
@@ -344,7 +373,7 @@ def seed_demo(db: Session, store: Optional[ObjectStore] = None, verbose: bool = 
 
     # aws V2：V1 前 120 張的前處理產物（等比例縮放 + 直方圖均衡的假想結果），
     # 用 image_lineage 記錄父子關係
-    log("產生 aws_images V2（V1 的前處理衍生批次）…")
+    log("generating aws_images V2 (a preprocessed batch derived from V1)…")
     derived_specs = []
     for parent_spec in aws_specs[:120]:
         payload = synth_cxr(hash(parent_spec.file_name) % 10**6 + 5_000_000)
@@ -363,42 +392,79 @@ def seed_demo(db: Session, store: Optional[ObjectStore] = None, verbose: bool = 
         db.add(m.ImageLineage(parent_image_id=parent.id, child_image_id=child.id))
     db.flush()
 
-    log("產生標註批次…")
+    log("generating annotation batches…")
     # aws V1（junior）與 V2（senior）標同一批圖 → annotator 衝突
     s.add_annotation_batch(
-        aws, "V1", ["Pneumonia", "Normal", "Effusion"], aws_images,
-        "radiologist_junior", coverage=0.85,
-        label_bias={"Normal": 2.0, "Pneumonia": 1.3, "Effusion": 0.6}, label_seed=11,
+        aws,
+        "V1",
+        ["Pneumonia", "Normal", "Effusion"],
+        aws_images,
+        "radiologist_junior",
+        coverage=0.85,
+        label_bias={"Normal": 2.0, "Pneumonia": 1.3, "Effusion": 0.6},
+        label_seed=11,
     )
     s.add_annotation_batch(
-        aws, "V2", ["Pneumonia", "Normal", "Effusion"], aws_images[:150],
-        "radiologist_senior", coverage=0.9,
-        label_bias={"Normal": 1.6, "Pneumonia": 1.6, "Effusion": 0.9}, label_seed=22,
+        aws,
+        "V2",
+        ["Pneumonia", "Normal", "Effusion"],
+        aws_images[:150],
+        "radiologist_senior",
+        coverage=0.9,
+        label_bias={"Normal": 1.6, "Pneumonia": 1.6, "Effusion": 0.9},
+        label_seed=22,
     )
     # indo V1／V2 標同一批圖 → 版本衝突；V2 多一個 EFFU 類別
     s.add_annotation_batch(
-        indo, "V1", ["PNEU", "NORM"], indo_images, "annotator_indo_a",
-        coverage=0.8, label_seed=33,
+        indo,
+        "V1",
+        ["PNEU", "NORM"],
+        indo_images,
+        "annotator_indo_a",
+        coverage=0.8,
+        label_seed=33,
     )
     s.add_annotation_batch(
-        indo, "V2", ["PNEU", "NORM", "EFFU"], indo_images, "annotator_indo_b",
-        coverage=0.85, label_seed=44,
+        indo,
+        "V2",
+        ["PNEU", "NORM", "EFFU"],
+        indo_images,
+        "annotator_indo_b",
+        coverage=0.85,
+        label_seed=44,
     )
     # TB-portal：唯一有 det 標註的來源
     s.add_annotation_batch(
-        tb, "V1", ["TB", "Normal", "Pneumonia"], tb_images, "radiologist_senior",
-        coverage=0.9, label_bias={"TB": 2.0}, with_det=True, det_categories=["TB", "Pneumonia"],
+        tb,
+        "V1",
+        ["TB", "Normal", "Pneumonia"],
+        tb_images,
+        "radiologist_senior",
+        coverage=0.9,
+        label_bias={"TB": 2.0},
+        with_det=True,
+        det_categories=["TB", "Pneumonia"],
         label_seed=55,
     )
     # DrLee：小寫命名，試 merge_identical 的極限
     s.add_annotation_batch(
-        drlee, "V1", ["pneumonia", "normal"], drlee_images, "dr_lee",
-        coverage=0.95, label_seed=66,
+        drlee,
+        "V1",
+        ["pneumonia", "normal"],
+        drlee_images,
+        "dr_lee",
+        coverage=0.95,
+        label_seed=66,
     )
     # aws V2（前處理批次）也有一份標註，讓 lineage 那條線有東西可看
     s.add_annotation_batch(
-        aws, "V3", ["Pneumonia", "Normal"], aws_v2_images, "radiologist_junior",
-        coverage=0.7, label_seed=77,
+        aws,
+        "V3",
+        ["Pneumonia", "Normal"],
+        aws_v2_images,
+        "radiologist_junior",
+        coverage=0.7,
+        label_seed=77,
     )
 
     db.commit()

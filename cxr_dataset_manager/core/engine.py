@@ -19,8 +19,9 @@ spec 先寫、資料庫後 commit。兩者不在同一個交易裡，所以順�
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -48,9 +49,9 @@ class Author:
 
     def __post_init__(self) -> None:
         if not self.name.strip():
-            raise SpecError("建立者姓名不能是空的")
+            raise SpecError("the builder's name cannot be empty")
         if "@" not in self.email:
-            raise SpecError(f"email 格式看起來不對：{self.email!r}")
+            raise SpecError(f"that email does not look right: {self.email!r}")
 
     def __str__(self) -> str:  # pragma: no cover
         return f"{self.name} <{self.email}>"
@@ -85,7 +86,7 @@ def _step_params(step: Step) -> dict[str, Any]:
     return step.model_dump(mode="json", exclude={"id", "op"}, exclude_none=True)
 
 
-def resolve_file_names(db: Session, step: Step) -> Optional[list[str]]:
+def resolve_file_names(db: Session, step: Step) -> list[str] | None:
     """取出一個 step 要用的檔名清單（design_doc §3）。
 
     `import_list` 與 `filter/explicit_list` 都可能用 file_names_ref——
@@ -102,16 +103,16 @@ def resolve_file_names(db: Session, step: Step) -> Optional[list[str]]:
     row = db.get(m.ManualSetImportList, ref.sha256)
     if row is None:
         raise SpecError(
-            f"step '{step.id}': manual_set_import_lists 裡找不到 "
-            f"sha256={ref.sha256[:12]}… 的清單"
-            f"（來源說明: {ref.source or '無'}）。"
-            "用 `cxr lists add <檔案>` 把它註冊進這個資料庫。"
+            f"step '{step.id}': manual_set_import_lists has no list "
+            f"with sha256={ref.sha256[:12]}…"
+            f" (source: {ref.source or 'none'}). "
+            "Register it in this database with `cxr lists add <file>`."
         )
     return list(row.file_names)
 
 
 def execute_spec(
-    db: Session, spec: BuildSpec, catalog: Optional[Catalog] = None
+    db: Session, spec: BuildSpec, catalog: Catalog | None = None
 ) -> ExecutionResult:
     catalog = catalog or Catalog(db)
     results: dict[str, CandidateSet] = {}
@@ -155,11 +156,13 @@ class BuildResult:
     """dry-run 時 manual_set_version_id 與 spec_key 都是 None——
     試跑不會在資料庫或物件儲存留下任何東西。"""
 
-    manual_set_version_id: Optional[int]
-    spec_key: Optional[str]
+    manual_set_version_id: int | None
+    spec_key: str | None
     dry_run: bool
     execution: ExecutionResult
     target_categories: dict[str, int] = field(default_factory=dict)
+    # `bucket/key` of the version's __meta__.md; None when build() got no meta
+    meta_location: str | None = None
 
     @property
     def counts(self) -> dict[str, int]:
@@ -179,7 +182,10 @@ def _write_selection(
 
     db.bulk_insert_mappings(
         m.ManualSetImage,
-        [{"manual_set_version_id": version_id, "image_id": i} for i in sorted(final.images)],
+        [
+            {"manual_set_version_id": version_id, "image_id": i}
+            for i in sorted(final.images)
+        ],
     )
     db.flush()
 
@@ -212,7 +218,9 @@ def _write_selection(
     # target category 與映射：只寫「真的被用到」的 local category，
     # 避免留下一堆指向不存在標註的死映射。
     present = local_categories_in(catalog, final)
-    used_targets = sorted({final.category_targets[c] for c in present if c in final.category_targets})
+    used_targets = sorted(
+        {final.category_targets[c] for c in present if c in final.category_targets}
+    )
     target_ids: dict[str, int] = {}
     for name in used_targets:
         row = m.ManualSetTargetCategory(manual_set_version_id=version_id, name=name)
@@ -242,8 +250,9 @@ def build(
     version: str,
     *,
     dry_run: bool = False,
-    author: Optional["Author"] = None,
-    catalog: Optional[Catalog] = None,
+    author: Author | None = None,
+    catalog: Catalog | None = None,
+    meta: Callable[[int], str] | None = None,
 ) -> BuildResult:
     """執行一份 spec，並（非 dry-run 時）產出正式的 manual-set version。
 
@@ -252,12 +261,17 @@ def build(
 
     dry-run 完全不寫資料庫：試跑就只是試跑。探索過程不留痕是刻意的，
     值得被記下來的只有「這份 spec 產出了這個版本」這件事。
+
+    `meta` produces the version's __meta__.md. It is called with the new
+    version id after the selection is flushed, so the statistics it reads are
+    final, and before the commit, so a build that fails writes none. Like the
+    spec, the file reaches object storage ahead of the commit.
     """
     if not dry_run:
         if author is None:
             raise SpecError(
-                "commit 需要知道是誰建的。用 --author-name / --author-email 指定，"
-                "或在 .env 裡設 CXR_AUTHOR_NAME 與 CXR_AUTHOR_EMAIL。"
+                "commit needs to know who is building it. Pass --author-name / --author-email, "
+                "or set CXR_AUTHOR_NAME and CXR_AUTHOR_EMAIL in .env."
             )
         # 先查一次只是為了在常見情況下快速給出好訊息；真正的保證是資料庫的
         # UNIQUE 約束，競態由下面的 IntegrityError 處理（樂觀鎖）。
@@ -295,6 +309,11 @@ def build(
         db.flush()
 
         target_ids = _write_selection(db, version_row.id, execution)
+        meta_location = None
+        if meta is not None:
+            meta_location = get_store().put_meta(
+                "manual-set", manual_set_name, version, meta(version_row.id)
+            )
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -303,17 +322,21 @@ def build(
         if "manual_set_versions" in str(exc.orig):
             owner = _version_owner(db, manual_set_name, version)
             raise SpecError(
-                f"'{manual_set_name}@{version}' 剛剛被"
-                + (f" {owner} " if owner else "別人 ")
-                + "建立了。版本是不可變的記錄，請換一個版本號重試"
-                "（你的探索狀態還在，改個版本號再 commit 一次即可）。"
+                f"'{manual_set_name}@{version}' was just created by"
+                + (f" {owner}. " if owner else " someone else. ")
+                + "Versions are immutable records; pick another version number and retry "
+                "(your exploration state is intact, just commit again with a new version)."
             ) from exc
         raise
-    except Exception:
+    except BaseException:
+        # BaseException, not Exception: `meta` may be asking a person, and a
+        # Ctrl-C there must not leave the half-written version in the session.
         db.rollback()
         raise
 
-    return BuildResult(version_row.id, spec_object_key, False, execution, target_ids)
+    return BuildResult(
+        version_row.id, spec_object_key, False, execution, target_ids, meta_location
+    )
 
 
 def _assert_annotations_are_mapped(execution: ExecutionResult) -> None:
@@ -332,10 +355,10 @@ def _assert_annotations_are_mapped(execution: ExecutionResult) -> None:
     )
     if unmapped:
         raise SpecError(
-            f"最終結果裡有 {len(unmapped)} 個 local category 沒有對應的 target category: "
+            f"the final result has {len(unmapped)} local categories with no target category: "
             + ", ".join(unmapped[:10])
             + ("…" if len(unmapped) > 10 else "")
-            + "。請補一個 category_map step 把它們映射掉（或用 filter 排除它們的標註）。"
+            + ". Add a category_map step to map them (or filter out their annotations)."
         )
 
 
@@ -354,20 +377,22 @@ def _assert_every_image_is_annotated(execution: ExecutionResult) -> None:
         return
     sample = ", ".join(catalog.image(i).ref for i in bare[:5])
     raise SpecError(
-        f"最終結果裡有 {len(bare)} 張影像沒有任何標註（{sample}"
+        f"the final result has {len(bare)} images with no annotation ({sample}"
         + ("…" if len(bare) > 5 else "")
-        + "）。manual-set 是 training-ready 的資料集，不接受沒標註的影像。"
-        "加一步 filter criterion=annotated 明確把它們剔除，"
-        "或補上涵蓋這些影像的 annotation batch。"
+        + "). A manual-set is a training-ready dataset and does not accept unannotated images. "
+        "Add a filter criterion=annotated step to drop them explicitly, "
+        "or add an annotation batch that covers them."
     )
 
 
-def _version_owner(db: Session, manual_set_name: str, version: str) -> Optional[str]:
+def _version_owner(db: Session, manual_set_name: str, version: str) -> str | None:
     """撞版本號時，告訴使用者是誰搶先建的。"""
     row = db.execute(
         select(m.ManualSetVersion.created_by_name, m.ManualSetVersion.created_by_email)
         .join(m.ManualSet, m.ManualSet.id == m.ManualSetVersion.manual_set_id)
-        .where(m.ManualSet.name == manual_set_name, m.ManualSetVersion.version == version)
+        .where(
+            m.ManualSet.name == manual_set_name, m.ManualSetVersion.version == version
+        )
     ).one_or_none()
     return f"{row[0]} <{row[1]}>" if row else None
 
@@ -376,10 +401,12 @@ def _assert_version_available(db: Session, manual_set_name: str, version: str) -
     exists = db.execute(
         select(m.ManualSetVersion.id)
         .join(m.ManualSet, m.ManualSet.id == m.ManualSetVersion.manual_set_id)
-        .where(m.ManualSet.name == manual_set_name, m.ManualSetVersion.version == version)
+        .where(
+            m.ManualSet.name == manual_set_name, m.ManualSetVersion.version == version
+        )
     ).scalar_one_or_none()
     if exists is not None:
         raise SpecError(
-            f"manual-set '{manual_set_name}' 已經有版本 '{version}'。"
-            "版本是不可變的記錄，請換一個版本號，不要覆蓋既有版本。"
+            f"manual-set '{manual_set_name}' already has version '{version}'. "
+            "Versions are immutable records; pick another version number instead of overwriting one."
         )

@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -17,20 +16,22 @@ MANUAL_SET_BUCKET = "manual-sets"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="CXR_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="CXR_", extra="ignore"
+    )
 
     # docker/docker-compose.yml 把 postgres 對外開在 5433
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5433/cxr"
 
-    s3_endpoint_url: Optional[str] = "http://localhost:9000"
+    s3_endpoint_url: str | None = "http://localhost:9010"
     s3_region: str = "us-east-1"
-    s3_access_key_id: Optional[str] = "minioadmin"
-    s3_secret_access_key: Optional[str] = "minioadmin"
+    s3_access_key_id: str | None = "minioadmin"
+    s3_secret_access_key: str | None = "minioadmin"
     presigned_url_expire_seconds: int = 3600
 
     # 誰建的資料集。設在 .env 就不用每次 commit 都打；沒設的話 CLI 會問。
-    author_name: Optional[str] = None
-    author_email: Optional[str] = None
+    author_name: str | None = None
+    author_email: str | None = None
 
     # 影像實際不存在物件儲存時（例如只匯入了 metadata），UI 顯示佔位圖而非壞掉的 <img>
     strict_object_storage: bool = False

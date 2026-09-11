@@ -28,7 +28,9 @@ def run(*args: str):
             f"`cxr {' '.join(args)}` 拋出 {type(result.exception).__name__}: "
             f"{result.exception}\n{result.output}"
         )
-    assert "Traceback" not in result.output, f"`cxr {' '.join(args)}` 吐了 traceback\n{result.output}"
+    assert "Traceback" not in result.output, (
+        f"`cxr {' '.join(args)}` 吐了 traceback\n{result.output}"
+    )
     return result
 
 
@@ -73,8 +75,30 @@ steps:
 final: mapped
 """
         )
-    ok("build", spec, "-m", name, "-v", "V1", "--author-name", "pytest", "--author-email", "pytest@example.com")
-    ok("build", spec, "-m", name, "-v", "V2", "--author-name", "pytest", "--author-email", "pytest@example.com")
+    ok(
+        "build",
+        spec,
+        "-m",
+        name,
+        "-v",
+        "V1",
+        "--author-name",
+        "pytest",
+        "--author-email",
+        "pytest@example.com",
+    )
+    ok(
+        "build",
+        spec,
+        "-m",
+        name,
+        "-v",
+        "V2",
+        "--author-name",
+        "pytest",
+        "--author-email",
+        "pytest@example.com",
+    )
 
     def cleanup():
         db = new_session()
@@ -93,16 +117,34 @@ final: mapped
 
 def test_help_lists_every_command():
     output = ok("--help")
-    for command in ("validate", "build", "show", "spec", "why", "diff",
-                    "check-leakage", "export", "explore", "db", "ls"):
+    for command in (
+        "validate",
+        "build",
+        "show",
+        "spec",
+        "why",
+        "diff",
+        "check-leakage",
+        "export",
+        "explore",
+        "db",
+        "ls",
+    ):
         assert command in output
 
 
-@pytest.mark.parametrize("group,command", [
-    ("ls", "sets"), ("ls", "batches"), ("ls", "categories"),
-    ("ls", "annotators"), ("ls", "manual-sets"), ("ls", "history"),
-    ("db", "status"),
-])
+@pytest.mark.parametrize(
+    "group,command",
+    [
+        ("ls", "sets"),
+        ("ls", "batches"),
+        ("ls", "categories"),
+        ("ls", "annotators"),
+        ("ls", "manual-sets"),
+        ("ls", "history"),
+        ("db", "status"),
+    ],
+)
 def test_readonly_subcommands_run(group, command, db):
     ok(group, command)
 
@@ -114,14 +156,14 @@ def test_ls_batches_with_a_filter(db):
 
 def test_validate(built):
     output = ok("validate", built["spec"])
-    assert "合法" in output
+    assert "valid spec" in output
 
 
 def test_show(built):
     """回歸測試：這支指令曾經 100% crash 在 subjects['distinct']。"""
     output = ok("show", f"{built['name']}@V1")
-    assert "影像" in output and "病患數" in output
-    assert "來源組成" in output and "Target category" in output
+    assert "Images" in output and "Subjects" in output
+    assert "Composition" in output and "Target categories" in output
     # 每個 target category 的正／負／未知分布
     assert "Category distribution" in output
     for column in ("CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"):
@@ -158,7 +200,9 @@ def test_spec_saves_a_byte_identical_file(built, tmp_path):
 def test_why(built, db):
     version_id = crud.resolve_version(db, built["name"], "V1")
     image_id = db.execute(
-        text("SELECT image_id FROM manual_set_images WHERE manual_set_version_id = :v LIMIT 1"),
+        text(
+            "SELECT image_id FROM manual_set_images WHERE manual_set_version_id = :v LIMIT 1"
+        ),
         {"v": version_id},
     ).scalar_one()
     ref = db.execute(
@@ -175,17 +219,17 @@ def test_why(built, db):
     ).scalar_one()
 
     output = ok("why", f"{built['name']}@V1", "--image", ref)
-    assert "在最終集合裡" in output
+    assert "in the final set" in output
 
 
 def test_why_on_an_image_that_was_never_involved(built):
     output = ok("why", f"{built['name']}@V1", "--image", "aws_images/V1/AWS_00000.png")
-    assert "集合裡" in output or "從未進入" in output
+    assert "final set" in output or "never entered" in output
 
 
 def test_diff(built):
     output = ok("diff", f"{built['name']}@V1", f"{built['name']}@V2")
-    assert "影像" in output and "cls 標註" in output
+    assert "Images" in output and "cls annotations" in output
 
 
 def test_check_leakage(built):
@@ -208,7 +252,7 @@ def test_export_coco_is_valid_json(built, tmp_path):
 
 def test_build_dry_run(built):
     output = ok("build", built["spec"], "-m", built["name"], "-v", "V-dry", "--dry-run")
-    assert "試跑" in output
+    assert "Dry run" in output
 
 
 # ---------------------------------------------------------------------------
@@ -226,25 +270,36 @@ def test_unknown_manual_set_fails_cleanly(built):
         ("check-leakage", "no_such_set@V1", f"{built['name']}@V1"),
     ):
         output = fails(*args)
-        assert "找不到" in output, f"`cxr {' '.join(args)}` 的錯誤訊息不夠清楚：{output}"
+        assert "not found" in output, (
+            f"`cxr {' '.join(args)}` 的錯誤訊息不夠清楚：{output}"
+        )
 
 
 def test_bad_ref_format_fails_cleanly(built):
     output = fails("show", "missing_the_at_sign")
-    assert "name@version" in output or "找不到" in output
+    assert "name@version" in output or "not found" in output
 
 
 def test_missing_spec_file_fails_cleanly():
-    assert "找不到" in fails("validate", "/tmp/definitely_not_here.yaml")
+    assert "not found" in fails("validate", "/tmp/definitely_not_here.yaml")
 
 
 def test_check_leakage_needs_two_versions(built):
-    assert "至少" in fails("check-leakage", f"{built['name']}@V1")
+    assert "at least two" in fails("check-leakage", f"{built['name']}@V1")
 
 
 def test_duplicate_version_is_refused(built):
-    assert "已經有版本" in fails(
-        "build", built["spec"], "-m", built["name"], "-v", "V1", "--author-name", "pytest", "--author-email", "pytest@example.com"
+    assert "already has version" in fails(
+        "build",
+        built["spec"],
+        "-m",
+        built["name"],
+        "-v",
+        "V1",
+        "--author-name",
+        "pytest",
+        "--author-email",
+        "pytest@example.com",
     )
 
 
@@ -256,14 +311,20 @@ def test_rm_refuses_without_confirmation_when_not_interactive(built):
 
 
 def test_rm_deletes_and_warns_about_the_spec(built, db):
+    from cxr_dataset_manager.storage import get_store
+
+    assert get_store().get_meta("manual-set", built["name"], "V2") is not None
     output = ok("rm", f"{built['name']}@V2", "--yes")
-    assert "spec" in output and "已刪除" in output
+    assert "spec" in output and "deleted" in output
     assert crud.resolve_version(db, built["name"], "V2") is None
     assert crud.resolve_version(db, built["name"], "V1") is not None
+    # the __meta__.md goes with the version, like its spec.yaml
+    assert get_store().get_meta("manual-set", built["name"], "V2") is None
+    assert get_store().get_meta("manual-set", built["name"], "V1") is not None
 
 
 def test_rm_on_a_missing_target_fails_cleanly(built):
-    assert "找不到" in fails("rm", "no_such_set@V1", "--yes")
+    assert "not found" in fails("rm", "no_such_set@V1", "--yes")
 
 
 def test_image_shows_annotations_lineage_and_duplicates(db):
@@ -279,10 +340,10 @@ def test_image_shows_annotations_lineage_and_duplicates(db):
     parent, child = edge
 
     out = ok("image", str(parent))
-    assert "血緣" in out and "衍生出" in out
+    assert "Lineage" in out and "derived into" in out
 
     # 反向也查得到
-    assert "來自" in ok("image", str(child))
+    assert "◀ from" in ok("image", str(child))
 
 
 def test_image_accepts_an_id_or_a_path(db):
@@ -318,12 +379,12 @@ def test_image_reports_which_datasets_use_it(built, db):
         {"n": built["name"]},
     ).scalar_one()
     out = ok("image", str(image_id))
-    assert "被這些資料集用了" in out and built["name"] in out
+    assert "Used by these datasets" in out and built["name"] in out
 
 
 def test_image_on_a_missing_or_ambiguous_target_fails_cleanly():
-    assert "找不到影像" in fails("image", "99999999")
-    assert "找不到影像" in fails("image", "no_such_file.png")
+    assert "not found" in fails("image", "99999999")
+    assert "not found" in fails("image", "no_such_file.png")
 
 
 def test_a_warning_never_ends_up_inside_the_saved_file(built, tmp_path):
@@ -341,11 +402,121 @@ def test_a_warning_never_ends_up_inside_the_saved_file(built, tmp_path):
     try:
         path = tmp_path / "warned.yaml"
         output = ok("spec", f"{built['name']}@V1", "-o", str(path))
-        assert "有人改過這份" in "".join(output.split()), output
+        assert "someoneeditedthisspec" in "".join(output.split()), output
 
         saved = path.read_text()
-        assert "⚠" not in saved and "有人改過" not in saved
+        assert "⚠" not in saved and "someone edited" not in saved
         assert saved == get_store().get_spec(built["name"], "V1")
         assert BuildSpec.from_yaml(saved).description == "被動過手腳"
     finally:
         get_store().put_spec(built["name"], "V1", original)
+
+
+# ---------------------------------------------------------------------------
+# export -f parquet: the manual-set layout of the dataset format
+# ---------------------------------------------------------------------------
+
+
+def test_export_parquet_writes_the_manual_set_layout(built, db, tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cxr_dataset_manager.core.export import PARQUET_FILES, parquet_dir
+
+    ok("export", f"{built['name']}@V1", "-o", str(tmp_path), "-f", "parquet")
+    out = parquet_dir(tmp_path, built["name"], "V1")
+    rows = {n: pq.read_table(out / f"{n}.parquet").to_pylist() for n in PARQUET_FILES}
+    images, cats, people = rows["images"], rows["categories"], rows["annotators"]
+    annotations = rows["cls_annotations"] + rows["det_annotations"]
+
+    summary = crud.version_summary(db, crud.resolve_version(db, built["name"], "V1"))
+    assert len(images) == summary["images"]
+    assert len(rows["cls_annotations"]) == summary["cls"]
+    assert len(rows["det_annotations"]) == summary["det"]
+
+    # renumbered from 1, and every reference lands: no dangling category or
+    # annotator, no unannotated image
+    assert [r["id"] for r in images] == list(range(1, len(images) + 1))
+    assert {r["image_id"] for r in annotations} == {r["id"] for r in images}
+    assert {r["category_id"] for r in annotations} == {r["id"] for r in cats}
+    assert {r["annotator_id"] for r in annotations} == {r["id"] for r in people}
+    # categories numbered by name — the same ids the __meta__.md prints
+    assert [r["name"] for r in cats] == sorted(r["name"] for r in cats)
+
+    det_schema = pq.read_schema(out / "det_annotations.parquet")
+    assert det_schema.field("bbox").type.value_type == pa.float64()
+    assert det_schema.field("segmentation").type.value_type.value_type == pa.float64()
+
+    meta_md = (out / "__meta__.md").read_text()
+    for name in (r["name"] for r in cats):
+        assert f"| {name} | {next(c['id'] for c in cats if c['name'] == name)} |" in meta_md
+
+
+def test_export_refuses_an_unknown_format(built):
+    assert "unknown format" in fails("export", f"{built['name']}@V1", "-f", "yolo")
+
+
+# ---------------------------------------------------------------------------
+# __meta__.md
+# ---------------------------------------------------------------------------
+
+
+def test_build_writes_the_meta_beside_the_spec(built, db):
+    """Without a terminal nothing is asked, but the statistics are still real."""
+    from cxr_dataset_manager.storage import get_store
+
+    md = get_store().get_meta("manual-set", built["name"], "V1")
+    summary = crud.version_summary(db, crud.resolve_version(db, built["name"], "V1"))
+    assert "- **Creator:**\n    pytest <pytest@example.com>" in md
+    assert f"| **Images** | {summary['images']} |" in md
+    for source in summary["composition"]:
+        assert f"| {source['original_set']} | {source['version']} | See spec.yaml |" in md
+    assert "- **Description:** N/A" in md
+
+
+def test_meta_manual_set_view_and_replace(built):
+    ref = f"{built['name']}@V1"
+    assert "## Composition of Datasets" in ok("meta", "manual-set", ref, "--view")
+    # a script must not replace it by accident
+    assert "--yes" in fails("meta", "manual-set", ref)
+    assert "wrote manual-sets/" in ok("meta", "manual-set", ref, "--yes")
+
+
+@pytest.mark.parametrize("kind", ["images", "annotations"])
+def test_meta_for_an_original_set_batch(kind, db):
+    """Writes into the dev bucket, so whatever was there is put back afterwards."""
+    from cxr_dataset_manager.storage import get_store
+
+    store = get_store()
+    before = store.get_meta(kind, "aws_images", "V1")
+    try:
+        extra = ["--sample", "5"] if kind == "images" else []
+        ok("meta", kind, "aws_images@V1", "--yes", *extra)
+        md = store.get_meta(kind, "aws_images", "V1")
+        assert md.startswith("## General Information")
+        if kind == "images":
+            n = db.execute(
+                text(
+                    """
+                    SELECT count(*) FROM images i
+                    JOIN image_batches ib ON ib.id = i.image_batch_id
+                    JOIN original_sets os ON os.id = ib.original_set_id
+                    WHERE os.name = 'aws_images' AND ib.version = 'V1'
+                    """
+                )
+            ).scalar_one()
+            assert f"| **Number of Images** | {n} |" in md
+            assert "| **Data Type** | `uint" in md
+        else:
+            assert "### Classification (`cls`)" in md and "Positive Boxes" in md
+    finally:
+        if before is None:
+            store.delete_meta(kind, "aws_images", "V1")
+        else:
+            store.put_meta(kind, "aws_images", "V1", before)
+
+
+def test_meta_on_a_missing_batch_fails_cleanly():
+    assert "not found" in fails("meta", "images", "no_such_set@V1")
+    assert "not found" in fails("meta", "annotations", "no_such_set@V1")
+    assert "not found" in fails("meta", "manual-set", "no_such_set@V1")

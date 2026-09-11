@@ -1,10 +1,12 @@
-"""`cxr explore` —— 終端機裡的探索式 session（Layer 4）。
+"""`cxr explore` — an exploration session in the terminal (Layer 4).
 
-跟 Notebook 走的是同一個 `ManualSetSession`：這裡只負責把
-指令列翻譯成方法呼叫、把結果印漂亮，一行業務邏輯都沒有（design_doc §1 principle 7）。
+It drives the same `ManualSetSession` a notebook does: this module only turns
+command lines into method calls and prints the results nicely, with not a line
+of business logic (design_doc §1 principle 7).
 
-探索狀態活在這個 process 的記憶體裡，離開就沒了——這跟整套設計一致：
-值得留下來的是 `save` 出去的 spec，或 `commit` 產生的版本。
+Exploration state lives in this process's memory and is gone on exit, as the
+whole design intends: what is worth keeping is a spec written with `save`, or
+the version a `commit` produces.
 """
 
 from __future__ import annotations
@@ -15,14 +17,13 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from cxr_dataset_manager.core.schema import BuildSpec
 from cxr_dataset_manager.core.types import SpecError
 from cxr_dataset_manager.db import crud
 from cxr_dataset_manager.db.engine import new_session
@@ -42,23 +43,26 @@ def _table(title: str, columns: list[str], rows: list[list[Any]]) -> Table:
 
 class ExploreShell(cmd.Cmd):
     intro = ""
-    doc_header = "指令（打 help <指令> 看細節）"
+    doc_header = "Commands (type help <command> for details)"
     ruler = "─"
 
     def __init__(self, name: str) -> None:
         super().__init__()
-        # readline 預設把 @ 和 - 當成斷詞字元，`source aws@V<Tab>` 只會拿 "V"
-        # 去比對，`TB-portal` 也會被 - 切斷。batch 名稱本來就含這兩個字元，
-        # 所以把分隔符收窄成純空白。
+        # readline treats @ and - as word delimiters by default, so
+        # `source aws@V<Tab>` would complete only "V" and `TB-portal` breaks at
+        # the hyphen. Batch names contain both, so the delimiters are narrowed
+        # to whitespace.
         try:
             import readline
 
             readline.set_completer_delims(" \t\n")
-        except ImportError:  # pragma: no cover - 沒有 readline 的平台
+        except ImportError:  # pragma: no cover - platforms without readline
             pass
         self.db = new_session()
         self.session = ManualSetSession(
-            self.db, name=name, on_warning=lambda msg: console.print(f"  [yellow]⚠[/]  {msg}")
+            self.db,
+            name=name,
+            on_warning=lambda msg: console.print(f"  [yellow]⚠[/]  {msg}"),
         )
         self.batches = crud.list_batches(self.db)
         self._batch_index: dict[str, list[str]] = {}
@@ -67,27 +71,32 @@ class ExploreShell(cmd.Cmd):
             self._batch_index.setdefault(key, []).append(b["batch_kind"])
         self._update_prompt()
 
-    # -- 基礎設施 ---------------------------------------------------------
+    # -- plumbing ---------------------------------------------------------
 
     def preloop(self) -> None:
-        """把 Tab 綁到補全。
+        """Bind Tab to completion.
 
-        readline 有兩套不相容的設定語法，而 Python 綁哪一套取決於平台：
-        部署目標 Ubuntu 是 GNU readline（`tab: complete`），開發機 macOS 是
-        libedit（`bind ^I rl_complete`）。送錯語法不會報錯，只是安靜地不生效。
+        readline has two incompatible configuration syntaxes and which one
+        Python talks to depends on the platform: the deployment target (Ubuntu)
+        uses GNU readline (`tab: complete`), the development Mac uses libedit
+        (`bind ^I rl_complete`). The wrong one raises no error; it silently
+        does nothing.
 
-        cmd.Cmd.cmdloop 寫死送 GNU 那句，所以 macOS 上 Tab 完全沒反應。這裡
-        在 cmdloop 綁定之前（preloop 先跑）依實際後端送對的那句；兩邊都明確
-        綁，GNU 那條路就不必依賴 cmd.Cmd 的內部實作維持不變。
+        cmd.Cmd.cmdloop hardcodes the GNU line, so on macOS Tab did nothing at
+        all. preloop runs before cmdloop binds, and sends the line the actual
+        backend understands; binding both explicitly means the GNU path does not
+        depend on cmd.Cmd's internals staying the same.
         """
         try:
             import readline
-        except ImportError:  # pragma: no cover - 沒有 readline 的平台
+        except ImportError:  # pragma: no cover - platforms without readline
             return
-        # readline.backend 是 3.13 才有的官方判別方式，3.12 只能看 __doc__。
+        # readline.backend is the official way to tell from 3.13 on; 3.12 only has __doc__.
         backend = getattr(readline, "backend", None)
         if backend is None:
-            backend = "editline" if "libedit" in (readline.__doc__ or "") else "readline"
+            backend = (
+                "editline" if "libedit" in (readline.__doc__ or "") else "readline"
+            )
         if backend == "editline":
             readline.parse_and_bind("bind ^I rl_complete")
         else:
@@ -95,17 +104,17 @@ class ExploreShell(cmd.Cmd):
 
     def _update_prompt(self) -> None:
         counts = self.session.current.counts()
-        state = f"{counts['images']}img" if self.session.head else "空"
+        state = f"{counts['images']}img" if self.session.head else "[NO IMGS NOW]"
         plain = f"cxr({self.session.name} {state})> "
-        # \001/\002 是 readline 用來標記「不佔寬度」的字元；沒有 tty 時
-        # readline 不介入，這些標記會直接印出來，所以只在互動模式加上色。
+        # \001/\002 tell readline "this takes no width"; without a tty readline
+        # is not involved and would print them, so colour only when interactive.
         if self.use_rawinput and sys.stdin.isatty():
             self.prompt = f"\001\033[36m\002{plain.rstrip()}\001\033[0m\002 "
         else:
             self.prompt = plain
 
     def _report(self) -> None:
-        """每個會改變狀態的指令後面都印這一行——探索時最想看的就是它。"""
+        """Printed after every command that changes state — the line you most want while exploring."""
         counts = self.session.current.counts()
         console.print(
             f"  [bold]{counts['images']}[/] img · [bold]{counts['cls']}[/] cls · "
@@ -121,9 +130,9 @@ class ExploreShell(cmd.Cmd):
             console.print(f"  [red]✗[/] {exc}")
         except (KeyError, IndexError, ValueError) as exc:
             console.print(f"  [red]✗[/] {type(exc).__name__}: {exc}")
-        except Exception as exc:  # 探索中不該因為打錯字就整個掉出去
+        except Exception as exc:  # a typo while exploring should not throw you out
             console.print(f"  [red]✗[/] {type(exc).__name__}: {exc}")
-            console.print("  [dim]完整堆疊：debug on[/]")
+            console.print("  [dim]full traceback: debug on[/]")
             if getattr(self, "_debug", False):
                 console.print(traceback.format_exc())
         return False
@@ -132,46 +141,55 @@ class ExploreShell(cmd.Cmd):
         return False
 
     def default(self, line: str) -> None:
-        console.print(f"  [red]✗[/] 不認得的指令 [bold]{line.split()[0]}[/]，打 [cyan]help[/] 看清單")
+        console.print(
+            f"  [red]✗[/] unknown command [bold]{line.split()[0]}[/]; "
+            "type [cyan]help[/] for the list"
+        )
 
     def _args(self, arg: str) -> list[str]:
         return shlex.split(arg)
 
-    def _resolve_batch(self, token: str, kind_flag: Optional[str]) -> tuple[str, str, str]:
-        """`aws_images@V1` → (original_set, version, kind)。
+    def _resolve_batch(self, token: str, kind_flag: str | None) -> tuple[str, str, str]:
+        """`aws_images@V1` → (original_set, version, kind).
 
-        同一個 名稱@版本 可能同時有 image 與 annotation batch，
-        這時一定要講清楚是哪一個，不猜。
+        One name@version may have both an image and an annotation batch; then
+        which one must be said explicitly, never guessed.
         """
         if "@" not in token:
-            raise SpecError(f"來源格式應為 名稱@版本（例如 aws_images@V1），收到 {token!r}")
+            raise SpecError(
+                f"a source is written name@version (e.g. aws_images@V1), got {token!r}"
+            )
         name, version = token.rsplit("@", 1)
         kinds = self._batch_index.get(f"{name}@{version}")
         if not kinds:
-            raise SpecError(f"找不到 {token}，用 [cyan]batches[/] 看有哪些")
+            raise SpecError(f"{token} not found; [cyan]batches[/] lists them")
         if kind_flag:
             if kind_flag not in kinds:
-                raise SpecError(f"{token} 沒有 {kind_flag} batch（它有：{', '.join(kinds)}）")
+                raise SpecError(
+                    f"{token} has no {kind_flag} batch (it has: {', '.join(kinds)})"
+                )
             return name, version, kind_flag
         if len(kinds) > 1:
             raise SpecError(
-                f"{token} 同時有 {' 和 '.join(kinds)} batch，請加上 --image 或 --annotation 指定"
+                f"{token} has both {' and '.join(kinds)} batches; "
+                "add --image or --annotation to choose"
             )
         return name, version, kinds[0]
 
-    # -- 來源 -------------------------------------------------------------
+    # -- sources ----------------------------------------------------------
 
     def do_source(self, arg: str) -> None:
-        """加入一整批來源。
+        """Add a whole batch as a source.
 
-        source <名稱@版本> [--image | --annotation]
+        source <name@version> [--image | --annotation]
 
-        image batch 只帶影像；annotation batch 會連同它標註到的影像一起帶進來。
-        同一個 名稱@版本 兩種都有時必須指定。
+        An image batch brings its images and the annotations they already have;
+        an annotation batch brings its annotations and the images they are on.
+        When a name@version has both kinds you must say which.
         """
         args = self._args(arg)
         if not args:
-            return console.print("  用法：source <名稱@版本> [--image|--annotation]")
+            return console.print("  usage: source <name@version> [--image|--annotation]")
         kind = None
         if "--image" in args:
             kind, args = "image", [a for a in args if a != "--image"]
@@ -188,54 +206,63 @@ class ExploreShell(cmd.Cmd):
         return [k for k in self._batch_index if k.startswith(text)]
 
     def do_import(self, arg: str) -> None:
-        """從檔名清單匯入（一行一個檔名）。
+        """Import from a file-name list (one name per line).
 
-        import <名稱@版本> <清單檔> [--strict]
+        import <name@version> <list file> [--strict]
 
-        預設對不上的檔名只警告不中斷（探索時先看看匹配狀況）；
-        --strict 則任何一筆對不上就整步失敗。
+        By default names that match nothing only warn (while exploring you want
+        to see how well the list matches); --strict fails the step on any miss.
         """
         args = self._args(arg)
         if len(args) < 2:
-            return console.print("  用法：import <名稱@版本> <清單檔> [--strict]")
+            return console.print("  usage: import <name@version> <list file> [--strict]")
         strict = "--strict" in args
         args = [a for a in args if a != "--strict"]
         name, version, _ = self._resolve_batch(args[0], "image")
         path = Path(args[1]).expanduser()
         if not path.exists():
-            raise SpecError(f"找不到清單檔 {path}")
+            raise SpecError(f"list file {path} not found")
         names = path.read_text().splitlines()
         self.session.import_list(
-            original_set=name, image_batch=version, file_names=names,
-            on_missing="error" if strict else "warn", source_note=path.name,
+            original_set=name,
+            image_batch=version,
+            file_names=names,
+            on_missing="error" if strict else "warn",
+            source_note=path.name,
         )
         report = self.session.last_import_report()
         if report:
             console.print(
-                f"  比對到 [bold]{report.matched_count}[/]/{report.requested}"
-                + (f"，[red]{report.missing_count:,} 筆對不上[/]" if report.missing_count else "")
+                f"  matched [bold]{report.matched_count}[/]/{report.requested}"
+                + (
+                    f", [red]{report.missing_count:,} did not match[/]"
+                    if report.missing_count
+                    else ""
+                )
             )
             for missing in report.missing[:10]:
                 console.print(f"    [dim]· {missing}[/]")
             if report.missing_count > 10:
-                console.print(f"    [dim]… 還有 {report.missing_count - 10:,} 筆[/]")
+                console.print(f"    [dim]… {report.missing_count - 10:,} more[/]")
         self._report()
 
     complete_import = complete_source
 
-    # -- 縮限 -------------------------------------------------------------
+    # -- narrowing --------------------------------------------------------
 
     def do_split(self, arg: str) -> None:
-        """決定性切割（同一組 seed 永遠切出同一批）。
+        """Deterministic split (the same seed always cuts the same images).
 
         split --mod 4 --keep 0,1,2 --seed my-seed [--key subject_id|image_id|file_name]
 
-        預設用 subject_id 當 key，同一位病患的影像永遠同進同出。
+        The key defaults to subject_id, so one patient's images always stay together.
         """
         args = self._args(arg)
         opts = self._kv(args)
         if not {"mod", "keep", "seed"} <= opts.keys():
-            return console.print("  用法：split --mod 4 --keep 0,1,2 --seed <seed> [--key subject_id]")
+            return console.print(
+                "  usage: split --mod 4 --keep 0,1,2 --seed <seed> [--key subject_id]"
+            )
         self.session.split(
             mod=int(opts["mod"]),
             keep_remainder=[int(x) for x in opts["keep"].split(",")],
@@ -245,32 +272,39 @@ class ExploreShell(cmd.Cmd):
         self._report()
 
     def do_balance(self, arg: str) -> None:
-        """把每個類別的影像數壓到上限以下。
+        """Cap the number of images of every class.
 
-        balance 500 --seed b1              # 每個 target category 最多 500 張
-        balance 500 --seed b1 --by local   # 改用映射前的 local category
+        balance 500 --seed b1              # at most 500 images per target category
+        balance 500 --seed b1 --by local   # by local category, before mapping
 
-        多標籤讓「每類剛好 N 張」無法同時成立——一張同時是 pneumonia 與
-        effusion 的圖會佔用兩個配額。做法是從最罕見的類別開始配額，罕見的
-        先拿滿，共用的影像順便幫常見類別填數。挑選用 hash(seed + image_id)，
-        同一組 seed 永遠挑出同一批。
+        Multi-label makes "exactly N per class" impossible — an image that is
+        both pneumonia and effusion fills two quotas. Quotas fill rarest class
+        first: rare classes take their share, and the images they share count
+        towards the common classes too. Picks use hash(seed + image_id), so the
+        same seed always picks the same images.
         """
         args = self._args(arg)
         opts = self._kv(args)
         positional = [a for a in args if not a.startswith("-") and a.isdigit()]
         if not positional:
-            return console.print('  用法：balance <每類上限> --seed <seed> [--by target|local]')
+            return console.print(
+                "  usage: balance <cap per class> --seed <seed> [--by target|local]"
+            )
         if "seed" not in opts:
-            return console.print("  [red]✗[/] 需要 --seed：挑哪幾張必須是決定性的")
+            return console.print(
+                "  [red]✗[/] --seed is required: which images are picked must be deterministic"
+            )
         self.session.balance(
-            max_per_class=int(positional[0]), seed=opts["seed"], by=opts.get("by", "target")
+            max_per_class=int(positional[0]),
+            seed=opts["seed"],
+            by=opts.get("by", "target"),
         )
         self._report()
         report = self.session.reports[self.session.head].stats
         console.print(
             _table(
-                "類別分布",
-                ["類別", "平衡前", "平衡後"],
+                "Class distribution",
+                ["class", "before", "after"],
                 [
                     [name, before, report["class_counts_after"].get(name, 0)]
                     for name, before in report["class_counts_before"].items()
@@ -279,44 +313,45 @@ class ExploreShell(cmd.Cmd):
         )
 
     def do_filter(self, arg: str) -> None:
-        """依 metadata 條件篩選。
+        """Filter by a condition on the metadata or the annotations.
 
         filter date_captured >= '2022-01-01'
         filter width >= 512 and original_set in ['aws_images', 'DrLee']
         filter regex(file_name, '^DL_2023')
-        filter --annotated                    # 只留有標註的影像
-        filter 'Pneumonia' in labels          # 依標註篩選
+        filter --annotated                    # keep only annotated images
+        filter 'Pneumonia' in labels          # filter by annotation
         filter 'pneumonia' in targets and not ('normal' in targets)
-        filter n_annotations >= 2             # 至少兩位標註過
+        filter n_annotations >= 2             # annotated at least twice
 
-        影像欄位：file_name, original_set, batch_version, width, height,
+        Image fields: file_name, original_set, batch_version, width, height,
         area, blake3_hash, date_captured, subject_id
 
-        標註欄位（隨前面的步驟變動）：labels, targets, annotators, n_annotations
+        Annotation fields (they follow the earlier steps): labels, targets,
+        annotators, n_annotations
         """
         if arg.strip() in ("--annotated", "annotated"):
             self.session.keep_annotated_only()
             return self._report()
         if not arg.strip():
             return console.print(
-                "  用法：filter <條件式>，例如 filter width >= 512"
-                "\n        filter --annotated   # 只留有標註的影像"
+                "  usage: filter <expression>, e.g. filter width >= 512"
+                "\n         filter --annotated   # keep only annotated images"
             )
         self.session.filter(criterion="predicate", expression=arg.strip())
         self._report()
 
     def do_pick(self, arg: str) -> None:
-        """用檔名清單在目前結果裡縮限（清單裡的檔名必須已經在集合中）。
+        """Narrow the current result with a file-name list (the names must already be in the set).
 
-        pick <清單檔> [--strict]
+        pick <list file> [--strict]
         """
         args = self._args(arg)
         if not args:
-            return console.print("  用法：pick <清單檔> [--strict]")
+            return console.print("  usage: pick <list file> [--strict]")
         strict = "--strict" in args
-        path = Path([a for a in args if a != "--strict"][0]).expanduser()
+        path = Path(next(a for a in args if a != "--strict")).expanduser()
         if not path.exists():
-            raise SpecError(f"找不到清單檔 {path}")
+            raise SpecError(f"list file {path} not found")
         self.session.filter(
             criterion="explicit_list",
             file_names=path.read_text().splitlines(),
@@ -326,56 +361,62 @@ class ExploreShell(cmd.Cmd):
         self._report()
 
     def do_duplicates(self, arg: str) -> None:
-        """列出目前集合裡 blake3 相同的影像，以及每一張各自帶的標註。
+        """List the images in the current set that share a blake3, with each copy's annotations.
 
-        duplicates [幾組]
+        duplicates [groups]
 
-        去重就是明確丟掉重複影像和它們的標註，所以決定留哪一張之前先看清楚。
-        挑好之後用 `dedup --keep <image_id>,<image_id>` 指定。
+        dedup discards duplicate images together with their annotations, so look
+        before deciding which copy to keep; then pin the winners with
+        `dedup --keep <image_id>,<image_id>`.
         """
         limit = int(arg.strip()) if arg.strip().isdigit() else 10
         groups = self.session.find_duplicates()
         if not groups:
-            return console.print("  [green]✓[/] 目前沒有內容重複的影像")
+            return console.print("  [green]✓[/] no images with duplicate content")
 
         cross = sum(1 for g in groups if g["cross_source"])
         console.print(
-            f"  共 [bold]{len(groups)}[/] 組內容重複（blake3 相同），"
-            f"其中 [bold]{cross}[/] 組跨來源"
+            f"  [bold]{len(groups)}[/] groups of duplicate content (same blake3), "
+            f"[bold]{cross}[/] of them across sources"
         )
         for group in groups[:limit]:
             console.print(f"  [dim]{group['blake3'][:16]}…[/]")
             for c in group["candidates"]:
-                labels = ", ".join(c["labels"]) or "[red]無標註[/]"
+                labels = ", ".join(c["labels"]) or "[red]no annotations[/]"
                 ann = len(c["cls_annotation_ids"]) + len(c["det_annotation_ids"])
                 console.print(
                     f"    [bold]#{c['image_id']}[/] {c['ref']}"
-                    f"  [dim]{ann} 筆標註 · {labels}"
-                    f" · 病患 {c['subject_id'] or '未知'}[/]"
+                    f"  [dim]{ann} annotations · {labels}"
+                    f" · subject {c['subject_id'] or 'unknown'}[/]"
                 )
         if len(groups) > limit:
-            console.print(f"  [dim]… 還有 {len(groups) - limit} 組（duplicates <n> 看更多）[/]")
-        console.print("  [dim]挑好之後：dedup --keep <image_id>,<image_id>,…[/]")
+            console.print(
+                f"  [dim]… {len(groups) - limit} more groups (duplicates <n> shows more)[/]"
+            )
+        console.print("  [dim]once you have chosen: dedup --keep <image_id>,<image_id>,…[/]")
 
     def do_dedup(self, arg: str) -> None:
-        """依 blake3 去重——丟掉重複影像連同它們的標註。
+        """Deduplicate by blake3 — discards duplicate images together with their annotations.
 
-        dedup                                  # 有標註的優先，其次 image_id 最小
-        dedup TB-portal,DrLee,aws_images       # 加上來源優先權
-        dedup --keep 5,712,918                 # 人工指定每組要留哪一張
-        dedup TB-portal,aws_images --keep 5    # 兩者可以並用
+        dedup                                  # annotated copy first, then the lowest image_id
+        dedup TB-portal,DrLee,aws_images       # add a source priority
+        dedup --keep 5,712,918                 # choose each group's survivor by hand
+        dedup TB-portal,aws_images --keep 5    # both together
 
-        先用 `duplicates` 看每一組帶了什麼再決定。沒被 --keep 指定的組，
-        優先留有標註的那張（blake3 相同就是同一張照片，留沒標註的等於丟掉標籤）。
+        Look at `duplicates` first. Groups not pinned with --keep keep the
+        annotated copy (identical blake3 is the same picture; keeping the bare
+        one throws labels away for nothing).
         """
         args = self._args(arg)
         keep: list[int] = []
         if "--keep" in args:
             idx = args.index("--keep")
             if idx + 1 >= len(args):
-                return console.print("  用法：dedup [來源優先權] --keep <image_id>,<image_id>")
+                return console.print(
+                    "  usage: dedup [source priority] --keep <image_id>,<image_id>"
+                )
             keep = [int(x) for x in args[idx + 1].split(",") if x.strip()]
-            args = args[:idx] + args[idx + 2:]
+            args = args[:idx] + args[idx + 2 :]
         priority = [p.strip() for p in " ".join(args).split(",") if p.strip()]
         self.session.dedup(source_priority=priority, keep=keep)
         self._report()
@@ -384,60 +425,77 @@ class ExploreShell(cmd.Cmd):
         names = {b["original_set_name"] for b in self.batches}
         return sorted(n for n in names if n.startswith(text))
 
-    # -- 集合運算 ---------------------------------------------------------
+    # -- set operations ---------------------------------------------------
 
     def do_union(self, arg: str) -> None:
-        """把還沒合併的分支接起來（每次 source/import 都會開一條新分支）。"""
+        """Join the branches not merged yet (every source/import opens a new branch)."""
         self.session.union()
         self._report()
 
     def do_intersect(self, arg: str) -> None:
-        """取所有未合併分支的交集。"""
+        """Intersect every branch not merged yet."""
         self.session.intersect()
         self._report()
 
     def do_except(self, arg: str) -> None:
-        """第一條分支扣掉其餘分支。"""
+        """The first branch minus the others."""
         self.session.exclude()
         self._report()
 
-    # -- 類別 -------------------------------------------------------------
+    # -- categories -------------------------------------------------------
 
     def do_categories(self, arg: str) -> None:
-        """看類別映射的現況：哪些已映射、哪些還沒。"""
+        """Show the category mapping so far: what is mapped and what is not."""
         report = self.session.preview_categories()
         if report["targets"]:
             console.print(
-                _table("已映射", ["target", "來自哪些 local category"],
-                       [[t["name"], ", ".join(t["local_categories"])] for t in report["targets"]])
+                _table(
+                    "Mapped",
+                    ["target", "from local categories"],
+                    [
+                        [t["name"], ", ".join(t["local_categories"])]
+                        for t in report["targets"]
+                    ],
+                )
             )
         if report["unmapped"]:
             console.print(
-                _table("[red]尚未映射[/]", ["scope", "local category", "標註數"],
-                       [[c["scope"], c["local_name"], c["annotations"]] for c in report["unmapped"]])
+                _table(
+                    "[red]Not mapped yet[/]",
+                    ["scope", "local category", "annotations"],
+                    [
+                        [c["scope"], c["local_name"], c["annotations"]]
+                        for c in report["unmapped"]
+                    ],
+                )
             )
-            console.print("  [dim]正式 build 會拒絕未映射的類別。用 map 或 merge-identical 處理。[/]")
+            console.print(
+                "  [dim]a real build refuses unmapped categories; "
+                "handle them with map or merge_identical.[/]"
+            )
         elif report["targets"]:
-            console.print("  [green]✓[/] 所有 local category 都已映射")
+            console.print("  [green]✓[/] every local category is mapped")
         else:
-            console.print("  [dim]目前沒有標註[/]")
+            console.print("  [dim]no annotations yet[/]")
 
     def do_map(self, arg: str) -> None:
-        """把某個 annotation batch 的類別映射到 target。
+        """Map the categories of one annotation batch to targets.
 
         map aws_images@V1 Pneumonia=pneumonia Normal=normal
 
-        scope 一定要寫清楚是哪個 annotation batch——類別命名空間是綁在
-        batch 底下的，同名不同義是常態。
+        The scope must name the annotation batch: category namespaces belong to
+        a batch, and the same name meaning different things is normal.
         """
         args = self._args(arg)
         if len(args) < 2:
-            return console.print("  用法：map <名稱@版本> Local=target [Local2=target2 ...]")
+            return console.print(
+                "  usage: map <name@version> Local=target [Local2=target2 ...]"
+            )
         scope = args[0]
         mapping = {}
         for pair in args[1:]:
             if "=" not in pair:
-                raise SpecError(f"映射要寫成 Local=target，收到 {pair!r}")
+                raise SpecError(f"a mapping is written Local=target, got {pair!r}")
             local, target = pair.split("=", 1)
             mapping[local.strip()] = target.strip()
         self.session.map_category(scope, mapping)
@@ -448,33 +506,39 @@ class ExploreShell(cmd.Cmd):
         return sorted(s for s in scopes if s.startswith(text))
 
     def do_merge_identical(self, arg: str) -> None:
-        """把完全同名的 local category 併成同名的 target。
+        """Merge identically named local categories into a target of the same name.
 
-        只合併「一模一樣」的名字——Pneumonia 與 pneumonia 不會被自動合併，
-        那種要用 map 顯式指定。
+        Only exact matches — Pneumonia and pneumonia are not merged automatically;
+        map those explicitly.
         """
         self.session.merge_identical_category()
         self._report()
 
-    # -- 衝突 -------------------------------------------------------------
+    # -- conflicts --------------------------------------------------------
 
     def do_conflicts(self, arg: str) -> None:
-        """攤開同一張圖被多個來源標註的情況。
+        """Show the images labelled by more than one source.
 
-        conflicts [幾筆範例]
+        conflicts [examples]
         """
         limit = int(arg.strip()) if arg.strip().isdigit() else 5
         summary = self.session.conflict_summary()
         if not summary["total"]:
-            return console.print("  [green]✓[/] 目前沒有同一張圖被多個來源標註的情況")
+            return console.print(
+                "  [green]✓[/] no image is labelled by more than one source"
+            )
         console.print(
-            f"  共 [bold]{summary['total']}[/] 張影像被多個來源標註，其中 "
-            f"[red]{summary['contradictions']}[/] 張是真的矛盾"
-            f"（各來源給的類別不一樣），{summary['duplicates']} 張只是重複標到同樣的類別"
+            f"  [bold]{summary['total']}[/] images are labelled by several sources: "
+            f"[red]{summary['contradictions']}[/] truly contradict "
+            f"(the sources give different categories), {summary['duplicates']} "
+            "merely repeat the same categories"
         )
         console.print(
-            _table("來源組合", ["組合", "影像數"],
-                   [[k, v] for k, v in summary["by_source_pair"].items()])
+            _table(
+                "Source pairs",
+                ["pair", "images"],
+                [[k, v] for k, v in summary["by_source_pair"].items()],
+            )
         )
         for group in summary["sample"][:limit]:
             colour = "red" if group["kind"] == "contradiction" else "yellow"
@@ -485,34 +549,32 @@ class ExploreShell(cmd.Cmd):
                     f"    [bold]{ids}[/] [dim]{src}[/] → {', '.join(info['targets'])}"
                     f"  [dim]{', '.join(info['annotators'])} · score {info['max_score']}[/]"
                 )
-        console.print(
-            "  [dim]要自己挑：resolve manual <annotation_id> [\"原因\"][/]"
-        )
+        console.print('  [dim]to choose yourself: resolve manual <annotation_id> ["reason"][/]')
 
     def do_resolve(self, arg: str) -> None:
-        """裁決衝突。規則涵蓋不到的會留著，不會靜默處理。
+        """Settle conflicts. What a rule cannot decide is left alone, never settled silently.
 
         resolve annotator radiologist_senior,radiologist_junior
         resolve version V3,V2,V1
         resolve score
-        resolve manual 1887 "主治醫師的判讀才對"
+        resolve manual 1887 "the attending's reading is right"
 
-        manual 是人工指定：`conflicts` 會印出每一筆的 annotation id，挑一個
-        填進來，那一筆留下、同一張圖上其他來源的標註剔除。
+        manual picks by hand: `conflicts` prints every annotation's id; the one
+        you name stays, and the other sources' annotations on that image go.
         """
         args = self._args(arg)
         if not args:
             return console.print(
-                "  用法：resolve annotator <a,b,c> | version <V3,V1> | score"
-                " | manual <影像> <annotation_id> [\"原因\"]"
+                "  usage: resolve annotator <a,b,c> | version <V3,V1> | score"
+                ' | manual <annotation_id> ["reason"]'
             )
         mode = args[0]
 
         if mode == "manual":
             if len(args) < 2 or not args[1].isdigit():
                 return console.print(
-                    '  用法：resolve manual <annotation_id> ["原因"]'
-                    "\n  [dim]conflicts 會印出每一筆的 id，挑一個填進來[/]"
+                    '  usage: resolve manual <annotation_id> ["reason"]'
+                    "\n  [dim]conflicts prints every id; pick one[/]"
                 )
             self.session.resolve_conflicts_by_manual_setting(
                 designated_annotation_id=int(args[1]),
@@ -521,8 +583,9 @@ class ExploreShell(cmd.Cmd):
             self._report()
             remaining = len(self.session.find_conflicts())
             console.print(
-                f"  [yellow]還有 {remaining} 張影像的衝突未裁決[/]" if remaining
-                else "  [green]✓[/] 衝突都解決了"
+                f"  [yellow]{remaining} images still have unsettled conflicts[/]"
+                if remaining
+                else "  [green]✓[/] every conflict is settled"
             )
             return
 
@@ -535,32 +598,38 @@ class ExploreShell(cmd.Cmd):
             self.session.resolve_conflicts_by_score()
         else:
             raise SpecError(
-                f"不認得的裁決方式 {mode!r}（可用：annotator / version / score / manual）"
+                f"unknown resolution {mode!r} (use annotator / version / score / manual)"
             )
         remaining = len(self.session.find_conflicts())
         self._report()
         if remaining:
-            console.print(f"  [yellow]還有 {remaining} 張影像的衝突沒被這條規則裁決[/]")
+            console.print(
+                f"  [yellow]{remaining} images have conflicts this rule could not settle[/]"
+            )
         else:
-            console.print("  [green]✓[/] 衝突都解決了")
+            console.print("  [green]✓[/] every conflict is settled")
 
     def complete_resolve(self, text, line, begidx, endidx):
-        return [m for m in ("annotator", "version", "score", "manual") if m.startswith(text)]
+        return [
+            m for m in ("annotator", "version", "score", "manual") if m.startswith(text)
+        ]
 
     def _override(self, include: bool, arg: str) -> None:
         verb = "include" if include else "exclude"
         args = self._args(arg)
         if len(args) < 2 or args[0] not in ("image", "cls", "det"):
             return console.print(
-                f'  用法：{verb} <image|cls|det> <id> ["原因"]\n'
-                f'        {verb} image 315 "拍攝品質不佳"\n'
-                f'        {verb} cls 1887 "這筆標註是錯的"\n'
-                "  [dim]id 從 images / duplicates / conflicts 的輸出取得[/]"
+                f'  usage: {verb} <image|cls|det> <id> ["reason"]\n'
+                f'         {verb} image 315 "poor image quality"\n'
+                f'         {verb} cls 1887 "this label is wrong"\n'
+                "  [dim]ids come from the output of images / duplicates / conflicts[/]"
             )
         if not args[1].isdigit():
-            return console.print(f"  [red]✗[/] id 要是數字，收到 {args[1]!r}")
+            return console.print(f"  [red]✗[/] the id must be a number, got {args[1]!r}")
         self.session.override_one(
-            include=include, kind=args[0], target_id=int(args[1]),
+            include=include,
+            kind=args[0],
+            target_id=int(args[1]),
             reason=args[2] if len(args) > 2 else "",
         )
         self._report()
@@ -571,99 +640,135 @@ class ExploreShell(cmd.Cmd):
     complete_include = complete_exclude
 
     def do_exclude(self, arg: str) -> None:
-        """排除一張影像或一筆標註。
+        """Exclude one image or one annotation.
 
-        exclude image 315 "拍攝品質不佳"
-        exclude cls 1887 "這筆標註是錯的"
-        exclude det 42 "框錯位置"
+        exclude image 315 "poor image quality"
+        exclude cls 1887 "this label is wrong"
+        exclude det 42 "box in the wrong place"
 
-        一律用 id——檔名不是全域唯一的，用路徑字串定位遲早會指錯。
-        id 從 `images`、`duplicates`、`conflicts` 的輸出取得。
-        理由會寫進 spec，之後 `cxr why` 查得到。
+        Always by id: file names are not globally unique, so a path string will
+        point at the wrong row sooner or later. Ids come from the output of
+        `images`, `duplicates` and `conflicts`. The reason goes into the spec,
+        where `cxr why` finds it later.
         """
         self._override(False, arg)
 
     def do_include(self, arg: str) -> None:
-        """納入一張影像或一筆標註——把前面步驟排除掉的加回來。
+        """Include one image or one annotation — bring back what an earlier step excluded.
 
-        include image 1 "罕見表現，訓練集一定要有"
-        include cls 291 "主治醫師的判讀"
+        include image 1 "rare presentation, the training set needs it"
+        include cls 291 "the attending's reading"
 
-        納入影像時會連同它既有的標註一起帶進來（跟 source --image 一致）。
+        Including an image brings its annotations too (as source --image does).
         """
         self._override(True, arg)
 
-    # -- 觀察 -------------------------------------------------------------
+    # -- inspecting -------------------------------------------------------
 
     def do_preview(self, arg: str) -> None:
-        """目前狀態的完整統計摘要。"""
+        """A full statistical summary of the current state."""
         if not self.session.head:
-            return console.print("  [dim]還沒有任何步驟[/]")
+            return console.print("  [dim]no steps yet[/]")
         p = self.session.preview()
         counts, delta = p["counts"], p.get("delta")
         head = (
-            f"影像 [bold]{counts['images']}[/]  cls [bold]{counts['cls']}[/]  "
+            f"Images [bold]{counts['images']}[/]  cls [bold]{counts['cls']}[/]  "
             f"det [bold]{counts['det']}[/]"
         )
         if delta:
             head += (
-                f"\n上一步變化：影像 {delta['images']:+d}"
-                f"（進 {delta['images_added']} / 出 {delta['images_removed']}）"
+                f"\nLast step: images {delta['images']:+d}"
+                f" (in {delta['images_added']} / out {delta['images_removed']})"
             )
         head += (
-            f"\n病患 {p['subjects']['distinct']} 人"
-            f"（{p['subjects']['images_without_subject']} 張無病患資訊）"
-            f"　未標註影像 {p['annotation_coverage']['images_without_annotation']}"
+            f"\nSubjects {p['subjects']['distinct']}"
+            f" ({p['subjects']['images_without_subject']} images without subject information)"
+            f"   unannotated images {p['annotation_coverage']['images_without_annotation']}"
         )
         console.print(Panel(head, title=f"[cyan]{self.session.name}[/]"))
         if p["by_source"]:
-            console.print(_table("來源分布", ["來源", "影像數"],
-                                 [[k, v] for k, v in p["by_source"].items()]))
+            console.print(
+                _table(
+                    "Sources",
+                    ["source", "images"],
+                    [[k, v] for k, v in p["by_source"].items()],
+                )
+            )
         dist = p["by_target_category"] or p["by_local_category"]
         if dist:
-            console.print(_table("類別分布", ["類別", "標註數"],
-                                 [[k, v] for k, v in dist.items()]))
-        rows = [r for r in p["category_distribution"] if r["det_all"] or r["cls_pos"]
-                or r["cls_neg"] or r["cls_unknown"] < counts["images"]]
+            console.print(
+                _table(
+                    "Categories",
+                    ["category", "annotations"],
+                    [[k, v] for k, v in dist.items()],
+                )
+            )
+        rows = [
+            r
+            for r in p["category_distribution"]
+            if r["det_all"]
+            or r["cls_pos"]
+            or r["cls_neg"]
+            or r["cls_unknown"] < counts["images"]
+        ]
         if rows:
             console.print(
                 _table(
-                    f"Category distribution（cls 以影像計，共 {counts['images']} 張；det 以框計）",
+                    f"Category distribution (cls counted in images, "
+                    f"{counts['images']} in all; det in boxes)",
                     ["target category", "CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"],
-                    [[r["target"], r["cls_pos"], r["cls_neg"], r["cls_unknown"], r["det_pos"]]
-                     for r in rows],
+                    [
+                        [
+                            r["target"],
+                            r["cls_pos"],
+                            r["cls_neg"],
+                            r["cls_unknown"],
+                            r["det_pos"],
+                        ]
+                        for r in rows
+                    ],
                 )
             )
-            if any(r["cls_pos"] + r["cls_neg"] + r["cls_unknown"] != counts["images"]
-                   for r in rows):
+            if any(
+                r["cls_pos"] + r["cls_neg"] + r["cls_unknown"] != counts["images"]
+                for r in rows
+            ):
                 console.print(
-                    "  [yellow]⚠[/] 有 target 的三欄相加對不上影像總數——"
-                    "同一張影像被不同來源同時說成陽性和陰性，衝突還沒收斂"
-                    "（打 conflicts 看，resolve 之後就會一致）"
+                    "  [yellow]⚠[/] for some targets the three cls columns do not add "
+                    "up to the image count — different sources call one image positive "
+                    "and negative, so the conflicts have not converged yet "
+                    "(type conflicts; after resolve they agree)"
                 )
             unscored = sum(r["det_no_score"] for r in rows)
             if unscored:
-                console.print(f"  [yellow]⚠[/] {unscored} 個 det 框沒有 score，不計入 DET POS")
+                console.print(
+                    f"  [yellow]⚠[/] {unscored} det boxes have no score and are not counted in DET POS"
+                )
         if p["categories"]["unmapped_local"]:
             console.print(
-                f"  [yellow]⚠[/] 還有 {len(p['categories']['unmapped_local'])} 個 "
-                "local category 沒映射（打 categories 看細節）"
+                f"  [yellow]⚠[/] {len(p['categories']['unmapped_local'])} local "
+                "categories are not mapped yet (type categories for details)"
             )
 
     def do_steps(self, arg: str) -> None:
-        """列出目前累積的步驟——這就是會被編譯成 spec 的那串。"""
+        """List the steps so far — the list that compiles into the spec."""
         rows = self.session.describe()
         if not rows:
-            return console.print("  [dim]還沒有任何步驟[/]")
+            return console.print("  [dim]No steps yet[/]")
         console.print(
             _table(
                 "Pipeline",
-                ["#", "step_id", "op", "inputs", "影像", "cls", "det", "分支", ""],
+                ["#", "step_id", "op", "inputs", "images", "cls", "det", "branch", ""],
                 [
                     [
-                        i, r["step_id"], r["op"], ", ".join(r["inputs"]) or "—",
-                        r["counts"]["images"], r["counts"]["cls"], r["counts"]["det"],
-                        "[yellow]末端[/]" if r["open"] else "",
+                        i,
+                        r["step_id"],
+                        r["op"],
+                        ", ".join(r["inputs"]) or "—",
+                        r["counts"]["images"],
+                        r["counts"]["cls"],
+                        r["counts"]["det"],
+                        "[yellow]BRANCH END[/]" if r["open"] else "",
                         "[cyan]← head[/]" if r["head"] else "",
                     ]
                     for i, r in enumerate(rows)
@@ -673,171 +778,201 @@ class ExploreShell(cmd.Cmd):
         open_ends = [r["step_id"] for r in rows if r["open"]]
         if len(open_ends) > 1:
             console.print(
-                f"  [dim]{len(open_ends)} 條分支還沒合併（{', '.join(open_ends)}）——"
-                "用 union 接起來，或 commit 時會自動補一個 union step[/]"
+                f"  [dim]{len(open_ends)} branches not merged yet ({', '.join(open_ends)}) — "
+                "join them with union, or commit adds a union step for you[/]"
             )
-        console.print("  [dim]checkout <step_id> 可以把 head 移到別條分支上[/]")
+        console.print("  [dim]checkout <step_id> can move head to other branch.[/]")
 
     def do_images(self, arg: str) -> None:
-        """抽樣列出目前集合裡的影像。
+        """List a sample of the images in the current set.
 
-        images [幾張]
+        images [count]
         """
         limit = int(arg.strip()) if arg.strip().isdigit() else 10
         cand, catalog = self.session.current, self.session.catalog
         ids = sorted(cand.images)[:limit]
         if not ids:
-            return console.print("  [dim]目前沒有影像[/]")
+            return console.print("  [dim]no images yet[/]")
         rows = []
         for image_id in ids:
             meta = catalog.image(image_id)
-            targets = sorted({
-                cand.category_targets[catalog.cls(a).category_id]
-                for a in cand.cls
-                if catalog.cls(a).image_id == image_id
-                and catalog.cls(a).category_id in cand.category_targets
-            })
+            targets = sorted(
+                {
+                    cand.category_targets[catalog.cls(a).category_id]
+                    for a in cand.cls
+                    if catalog.cls(a).image_id == image_id
+                    and catalog.cls(a).category_id in cand.category_targets
+                }
+            )
             rows.append(
-                [f"#{image_id}", meta.ref, meta.subject_id or "—", ", ".join(targets) or "—"]
+                [
+                    f"#{image_id}",
+                    meta.ref,
+                    meta.subject_id or "—",
+                    ", ".join(targets) or "—",
+                ]
             )
         console.print(
-            _table(f"影像（前 {len(ids)} / {len(cand.images)} 張）",
-                   ["id", "影像", "病患", "類別"], rows)
+            _table(
+                f"Images (first {len(ids)} of {len(cand.images)})",
+                ["id", "image", "subject", "categories"],
+                rows,
+            )
         )
-        console.print('  [dim]exclude image <id> ["原因"] 可以排除其中一張[/]')
+        console.print('  [dim]exclude image <id> ["reason"] excludes one of them[/]')
 
     def do_batches(self, arg: str) -> None:
-        """列出可以當來源的所有 batch。"""
+        """List every batch that can be a source."""
         console.print(
-            _table("Batches", ["spec 寫法", "種類", "數量", "類別數"],
-                   [[f"{b['original_set_name']}@{b['version']}", b["batch_kind"],
-                     b["item_count"], b["categories"] or ""] for b in self.batches])
+            _table(
+                "Batches",
+                ["in a spec", "kind", "items", "categories"],
+                [
+                    [
+                        f"{b['original_set_name']}@{b['version']}",
+                        b["batch_kind"],
+                        b["item_count"],
+                        b["categories"] or "",
+                    ]
+                    for b in self.batches
+                ],
+            )
         )
 
-    # -- 試錯 -------------------------------------------------------------
+    # -- trial and error --------------------------------------------------
 
     def do_checkpoint(self, arg: str) -> None:
-        """記下目前位置，之後可以 rollback 回來。
+        """Remember where you are, to rollback to it later.
 
         checkpoint after_dedup
         """
         label = arg.strip()
         if not label:
-            return console.print("  用法：checkpoint <標記名稱>")
+            return console.print("  usage: checkpoint <label>")
         self.session.checkpoint(label)
-        console.print(f"  [green]✓[/] 記下 [bold]{label}[/]（第 {len(self.session.steps)} 步）")
+        console.print(
+            f"  [green]✓[/] remembered [bold]{label}[/] (step {len(self.session.steps)})"
+        )
 
     def do_rollback(self, arg: str) -> None:
-        """退回某個 checkpoint，之後的步驟全部丟掉。
+        """Go back to a checkpoint, discarding every step after it.
 
         rollback after_dedup
         """
         label = arg.strip()
         if not label:
             return console.print(
-                f"  用法：rollback <標記>（現有：{', '.join(self.session.checkpoints) or '無'}）"
+                f"  usage: rollback <label> (existing: {', '.join(self.session.checkpoints) or 'none'})"
             )
         self.session.rollback(label)
-        console.print(f"  [green]✓[/] 回到 [bold]{label}[/]")
+        console.print(f"  [green]✓[/] back at [bold]{label}[/]")
         self._report()
 
     def complete_rollback(self, text, line, begidx, endidx):
         return [c for c in self.session.checkpoints if c.startswith(text)]
 
     def do_checkout(self, arg: str) -> None:
-        """切換到某個步驟，接下來的操作都套在它上面。
+        """Move to a step; the next commands apply on top of it.
 
         checkout source_2
 
-        每次 source / import 都會開一條新分支並成為目前位置；用這個指令
-        可以回到先前的分支繼續加工。`steps` 會標出目前在哪一步。
+        Every source / import opens a new branch and moves there; this command
+        goes back to an earlier branch to keep working on it. `steps` shows
+        where you are.
         """
         step_id = arg.strip()
         if not step_id:
             return console.print(
-                f"  用法：checkout <step_id>（現有：{', '.join(s.id for s in self.session.steps) or '無'}）"
+                f"  usage: checkout <step_id> (existing: {', '.join(s.id for s in self.session.steps) or 'none'})"
             )
         self.session.checkout(step_id)
-        console.print(f"  [green]✓[/] 目前位置：[bold]{step_id}[/]")
+        console.print(f"  [green]✓[/] now at [bold]{step_id}[/]")
         self._report()
 
     def complete_checkout(self, text, line, begidx, endidx):
         return [s.id for s in self.session.steps if s.id.startswith(text)]
 
     def do_undo(self, arg: str) -> None:
-        """復原目前所在的那一步，位置退回它的 input。
+        """Undo the step you are on; you move back to its input.
 
-        跟 rollback 的差別：undo 一次退一步、不需要事先做標記；
-        rollback 是一次退回某個 checkpoint，中間幾步一起丟掉。
+        Unlike rollback: undo goes back one step and needs no label; rollback
+        returns to a checkpoint, discarding every step in between.
         """
         if not self.session.steps or self.session.head is None:
-            return console.print("  [dim]沒有可以復原的步驟[/]")
+            return console.print("  [dim]nothing to undo[/]")
         dropped = self.session.head
         self.session.undo()
-        console.print(f"  [green]✓[/] 已復原 [bold]{dropped}[/]")
+        console.print(f"  [green]✓[/] undid [bold]{dropped}[/]")
         self._report()
 
-    # -- 產出 -------------------------------------------------------------
+    # -- output -----------------------------------------------------------
 
     def do_spec(self, arg: str) -> None:
-        """看目前會編譯出來的 spec（只是顯示，要存檔用 save）。"""
+        """Show the spec the current steps compile to (display only; save writes a file)."""
         if not self.session.steps:
-            return console.print("  [dim]還沒有任何步驟[/]")
+            return console.print("  [dim]no steps yet[/]")
         spec = self.session.compile(strict_conflicts=False)
-        # 純顯示。要存檔請用 save——它直接寫檔案，不經過終端機。
+        # Display only. Saving is `save`, which writes the file without the terminal.
         console.print(Syntax(spec.to_yaml(), "yaml", theme="ansi_dark", word_wrap=True))
 
     def do_save(self, arg: str) -> None:
-        """把 spec 存成 YAML 檔（之後可以用 cxr build 跑，或 load 回來繼續）。
+        """Save the spec as a YAML file (run it with cxr build later, or load it back).
 
-        save                    存到暫存檔，路徑會印出來
-        save pneumonia_v5.yaml  存到指定位置
+        save                    saves to a temp file and prints the path
+        save pneumonia_v5.yaml  saves where you say
 
-        探索到一半想留個底、或想拿去 diff 的時候用。commit 之後 spec 會自己
-        進到物件儲存，不需要另外存。
+        For keeping a snapshot mid-exploration, or for diffing. A commit puts
+        the spec into object storage by itself; no separate save is needed.
         """
         spec = self.session.compile()
         raw = arg.strip()
         if raw:
             path = Path(raw).expanduser()
         else:
-            # 沒給檔名就丟暫存目錄。探索過程中想存個底是很隨手的動作，
-            # 不該逼使用者當場想一個檔名跟一個位置。
+            # No name means the temp directory. Keeping a snapshot mid-exploration
+            # is a casual act; it should not demand a file name and a place.
             tmp = Path(tempfile.gettempdir()) / "cxr-specs"
             tmp.mkdir(parents=True, exist_ok=True)
             path = tmp / f"{self.session.name}-{spec.sha256()[:12]}.yaml"
         path.write_text(spec.to_yaml())
-        # soft_wrap：暫存路徑很長，被 Rich 折成兩行就複製不起來了
+        # soft_wrap: temp paths are long, and one Rich folds in two cannot be copied
         console.print(
-            f"  [green]✓[/] 已存到 [bold]{path}[/]  sha256 {spec.sha256()[:16]}…",
+            f"  [green]✓[/] saved to [bold]{path}[/]  sha256 {spec.sha256()[:16]}…",
             soft_wrap=True,
         )
 
     def do_load(self, arg: str) -> None:
-        """載入一份既有 spec，接著往下探索。
+        """Load an existing spec and keep exploring from it.
 
-        load pneumonia_v5.yaml     從本機檔案
-        load pneumonia@V1          從物件儲存讀該版本當初的 spec
+        load pneumonia_v5.yaml     from a local file
+        load pneumonia@V1          that version's spec, from object storage
         """
         token = arg.strip()
         if not token:
-            return console.print("  用法：load <檔名.yaml> 或 <manual-set>@<版本>")
+            return console.print("  usage: load <file.yaml> or <manual-set>@<version>")
         spec = crud.load_spec_from(
-            self.db, token, on_warning=lambda msg: console.print(f"  [yellow]⚠[/] {msg}")
+            self.db,
+            token,
+            on_warning=lambda msg: console.print(f"  [yellow]⚠[/] {msg}"),
         )
         self.session.replay(spec)
-        console.print(f"  [green]✓[/] 已載入 {len(self.session.steps)} 個步驟")
+        console.print(f"  [green]✓[/] loaded {len(self.session.steps)} steps")
         self._report()
 
     def do_commit(self, arg: str) -> None:
-        """產出正式的 manual-set 版本。
+        """Produce an official manual-set version.
 
         commit -m pneumonia -v V5 [--dry-run]
 
-        --dry-run 會完整跑一遍但完全不寫資料庫。
-        正式 commit 會記下建立者——沒設 CXR_AUTHOR_NAME / CXR_AUTHOR_EMAIL 就當場問。
+        --dry-run runs everything and writes nothing at all. A real commit
+        records who built it — asked on the spot unless CXR_AUTHOR_NAME /
+        CXR_AUTHOR_EMAIL are set — and then asks for the version's __meta__.md:
+        a description, what changed since the previous version, and how each
+        source was selected. It is stored beside the spec, and
+        `cxr meta manual-set` rewrites it later.
         """
         from cxr_dataset_manager.cli.main import _resolve_author
+        from cxr_dataset_manager.cli.meta import on_commit
 
         args = self._args(arg)
         opts = self._kv(args)
@@ -845,39 +980,53 @@ class ExploreShell(cmd.Cmd):
         name = opts.get("m") or opts.get("name") or self.session.name
         version = opts.get("v") or opts.get("version") or "V1"
         if not self.session.steps:
-            return console.print("  [red]✗[/] 還沒有任何步驟")
+            return console.print("  [red]✗[/] no steps yet")
 
-        author = None if dry else _resolve_author(opts.get("author-name"), opts.get("author-email"))
+        author = (
+            None
+            if dry
+            else _resolve_author(opts.get("author-name"), opts.get("author-email"))
+        )
         result = self.session.commit(
-            version=version, manual_set_name=name, dry_run=dry, author=author
+            version=version,
+            manual_set_name=name,
+            dry_run=dry,
+            author=author,
+            meta=None if dry else on_commit(self.db),
         )
         counts = result.counts
         body = (
-            f"影像 [bold]{counts['images']}[/]  cls [bold]{counts['cls']}[/]  "
+            f"images [bold]{counts['images']}[/]  cls [bold]{counts['cls']}[/]  "
             f"det [bold]{counts['det']}[/]"
         )
         if dry:
-            console.print(Panel(body, title="[yellow]試跑完成[/]（資料庫沒有任何寫入）"))
+            console.print(
+                Panel(body, title="[yellow]Dry run finished[/] (nothing was written)")
+            )
         else:
-            body += f"\ntarget category: {', '.join(result.target_categories) or '—'}"
+            body += f"\ntarget categories: {', '.join(result.target_categories) or '—'}"
             body += f"\nspec → [dim]{result.spec_key}[/]"
+            body += f"\n__meta__.md → [dim]{result.meta_location}[/]"
             console.print(Panel(body, title=f"[green]✓[/] {name}@{version}"))
-            console.print(f"  [dim]建立者 {author}[/]")
-            console.print(f"  [dim]cxr show {name}@{version}　cxr export {name}@{version} -f zip[/]")
+            console.print(f"  [dim]built by {author}[/]")
+            console.print(
+                f"  [dim]cxr show {name}@{version}   "
+                f"cxr export {name}@{version} -f parquet[/]"
+            )
 
-    # -- 雜項 -------------------------------------------------------------
+    # -- misc -------------------------------------------------------------
 
     def do_debug(self, arg: str) -> None:
-        """開關完整錯誤堆疊：debug on / debug off"""
+        """Toggle full tracebacks: debug on / debug off"""
         self._debug = arg.strip() == "on"
         console.print(f"  debug = {'on' if self._debug else 'off'}")
 
     def do_quit(self, arg: str) -> bool:
-        """離開（探索狀態不會被保留）。"""
+        """Leave (the exploration state is not kept)."""
         if self.session.steps:
             console.print(
-                f"  [dim]{len(self.session.steps)} 個步驟不會被保留。"
-                "想留下來的話用 save <檔名.yaml> 或 commit。[/]"
+                f"  [dim]{len(self.session.steps)} steps will not be kept. "
+                "To keep them use save <file.yaml> or commit.[/]"
             )
         return True
 
@@ -886,7 +1035,7 @@ class ExploreShell(cmd.Cmd):
 
     @staticmethod
     def _kv(args: list[str]) -> dict[str, str]:
-        """把 --key value 拆成 dict。"""
+        """Split --key value pairs into a dict."""
         opts: dict[str, str] = {}
         i = 0
         while i < len(args):
@@ -901,19 +1050,19 @@ class ExploreShell(cmd.Cmd):
         return opts
 
 
-BANNER = """[bold cyan]cxr explore[/] —— 互動式資料集建構
+BANNER = """[bold cyan]cxr explore[/] —— Interactive manual-set exploration and construction
 
-  [bold]來源[/]    source aws_images@V1 --annotation   import DrLee@V1 list.txt
-  [bold]縮限[/]    split --mod 4 --keep 0,1,2 --seed s1    filter 'x' in targets    balance 500 --seed b
-            pick list.txt
-  [bold]整理[/]    union   duplicates   dedup --keep 5,712   merge_identical   map aws_images@V1 A=a
-  [bold]人工[/]    include / exclude <image|cls|det> <id> ["原因"]
-  [bold]檢查[/]    preview   steps   categories   conflicts   images   batches
-  [bold]試錯[/]    checkpoint <名稱>   rollback <名稱>   undo   checkout <step_id>
-  [bold]產出[/]    spec   save x.yaml   commit -m 名字 -v V1 [--dry-run]
+  [bold]Source         [/]    source aws_images@V1 --annotation | import DrLee@V1 list.txt | load
+  [bold]Limit          [/]    split --mod 4 --keep 0,1,2 --seed s1 | filter 'x' in targets | balance 500 --seed b | pick list.txt
+  [bold]Reorganize     [/]    union | duplicates | dedup --keep 5,712 | merge_identical | map aws_images@V1 A=a
+  [bold]Manual decision[/]    include / exclude <image|cls|det> <id> ["reason"]
+  [bold]Inspect        [/]    preview | steps | categories | conflicts | images | batches
+  [bold]Debug          [/]    checkpoint <checkpoint_name> | rollback <checkpoint_name> | undo | checkout <step_id>
+  [bold]Output         [/]    spec | save x.yaml | commit -m <manual-set-name> -v <version> [--dry-run]
 
-  探索狀態只在記憶體裡，離開就沒了——[dim]要留下來請 save 或 commit[/]
-  [dim]Tab 補全 · help <指令> 看細節 · quit 離開[/]"""
+  Exploration state only stays in the memory, gone at exit.
+  [dim]To keep the explored state please use `save` or `commit` [/]
+  [dim]Tab completion · `help <command>` for details · `quit` to leave[/]"""
 
 
 def run(name: str) -> None:
@@ -924,5 +1073,5 @@ def run(name: str) -> None:
             shell.cmdloop(intro="")
             break
         except KeyboardInterrupt:
-            # Ctrl-C 只取消這一行，不要把整個 session 丟掉
-            console.print("\n  [dim]^C（要離開請打 quit）[/]")
+            # Ctrl-C cancels only this line; it must not throw the session away
+            console.print("\n  [dim]^C (type `quit` to leave)[/]")
