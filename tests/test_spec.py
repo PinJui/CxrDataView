@@ -22,7 +22,7 @@ def test_minimal_spec_parses():
 
 
 def test_source_needs_exactly_one_batch_kind():
-    with pytest.raises(ValidationError, match="只能指定"):
+    with pytest.raises(ValidationError, match="exactly one of"):
         BuildSpec.from_yaml(
             """
             steps:
@@ -30,12 +30,12 @@ def test_source_needs_exactly_one_batch_kind():
             final: a
             """
         )
-    with pytest.raises(ValidationError, match="只能指定"):
+    with pytest.raises(ValidationError, match="exactly one of"):
         BuildSpec.from_yaml("steps: [{id: a, op: source, original_set: x}]\nfinal: a")
 
 
 def test_forward_reference_is_rejected():
-    with pytest.raises(ValidationError, match="尚未定義"):
+    with pytest.raises(ValidationError, match="before it is defined"):
         BuildSpec.from_yaml(
             """
             steps:
@@ -47,7 +47,7 @@ def test_forward_reference_is_rejected():
 
 
 def test_duplicate_step_id_is_rejected():
-    with pytest.raises(ValidationError, match="重複"):
+    with pytest.raises(ValidationError, match="duplicate step id"):
         BuildSpec.from_yaml(
             """
             steps:
@@ -77,7 +77,7 @@ def test_sample_filter_requires_its_params():
 
 def test_keep_remainder_covering_everything_is_rejected():
     """留下全部餘數的 filter 不會篩掉任何東西——那是打錯字，不是有效設定。"""
-    with pytest.raises(ValidationError, match="不會篩掉"):
+    with pytest.raises(ValidationError, match="would drop nothing"):
         BuildSpec.from_yaml(
             """
             steps:

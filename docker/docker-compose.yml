@@ -9,7 +9,7 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - /data/postgres-data:/var/lib/postgresql/data
 
   pgadmin:
     image: dpage/pgadmin4
@@ -32,11 +32,7 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # Web console
+      - "9010:9000"   # S3 API
+      - "9011:9001"   # Web console
     volumes:
-      - minio_data:/data
-
-volumes:
-  postgres_data:
-  minio_data:
+      - /data/minio-data:/data

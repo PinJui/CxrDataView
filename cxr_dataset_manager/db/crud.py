@@ -6,20 +6,23 @@ CLI 的各個指令共用同一套查詢——介面只是皮，邏輯只寫一�
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from cxr_dataset_manager.core.meta import PNG_HEADER_BYTES, PNG_SIGNATURE, png_dtype
 from cxr_dataset_manager.core.schema import BuildSpec
 from cxr_dataset_manager.core.types import SpecError
 from cxr_dataset_manager.db import models as m
+
 # spec 本體不在資料庫，讀某個版本的 spec 一定要碰物件儲存。storage 跟
 # settings 一樣是最外層的葉子模組（不 import 任何 cxr 模組），所以這條
 # 相依方向跟 db → settings 一致，沒有繞回來。
-from cxr_dataset_manager.storage import get_store, spec_key
-
+from cxr_dataset_manager.storage import get_store, object_key_for_image, spec_key
 
 # ---------------------------------------------------------------------------
 # 目錄瀏覽
@@ -27,9 +30,10 @@ from cxr_dataset_manager.storage import get_store, spec_key
 
 
 def list_original_sets(db: Session) -> list[dict[str, Any]]:
-    rows = db.execute(
-        text(
-            """
+    rows = (
+        db.execute(
+            text(
+                """
             SELECT os.id, os.name, os.created_at,
                    (SELECT count(*) FROM image_batches ib WHERE ib.original_set_id = os.id) AS image_batches,
                    (SELECT count(*) FROM annotation_batches ab WHERE ab.original_set_id = os.id) AS annotation_batches,
@@ -38,12 +42,15 @@ def list_original_sets(db: Session) -> list[dict[str, Any]]:
                      WHERE ib.original_set_id = os.id) AS images
             FROM original_sets os ORDER BY os.name
             """
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return [dict(r) for r in rows]
 
 
-def list_batches(db: Session, original_set: Optional[str] = None) -> list[dict[str, Any]]:
+def list_batches(db: Session, original_set: str | None = None) -> list[dict[str, Any]]:
     sql = """
         SELECT b.original_set_name, b.batch_kind, b.version, b.batch_id,
                CASE WHEN b.batch_kind = 'image'
@@ -59,13 +66,20 @@ def list_batches(db: Session, original_set: Optional[str] = None) -> list[dict[s
         ORDER BY b.original_set_name, b.batch_kind, b.version
     """
     where = "WHERE b.original_set_name = :name" if original_set else ""
-    rows = db.execute(
-        text(sql.format(where=where)), {"name": original_set} if original_set else {}
-    ).mappings().all()
+    rows = (
+        db.execute(
+            text(sql.format(where=where)),
+            {"name": original_set} if original_set else {},
+        )
+        .mappings()
+        .all()
+    )
     return [dict(r) for r in rows]
 
 
-def list_categories(db: Session, annotation_batch_id: Optional[int] = None) -> list[dict[str, Any]]:
+def list_categories(
+    db: Session, annotation_batch_id: int | None = None
+) -> list[dict[str, Any]]:
     stmt = (
         select(
             m.Category.id,
@@ -85,23 +99,28 @@ def list_categories(db: Session, annotation_batch_id: Optional[int] = None) -> l
 
 
 def list_annotators(db: Session) -> list[dict[str, Any]]:
-    rows = db.execute(
-        text(
-            """
+    rows = (
+        db.execute(
+            text(
+                """
             SELECT a.id, a.name,
                    (SELECT count(*) FROM cls_annotations c WHERE c.annotator_id = a.id) AS cls,
                    (SELECT count(*) FROM det_annotations d WHERE d.annotator_id = a.id) AS det
             FROM annotators a ORDER BY a.name
             """
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return [dict(r) for r in rows]
 
 
 def list_manual_sets(db: Session) -> list[dict[str, Any]]:
-    rows = db.execute(
-        text(
-            """
+    rows = (
+        db.execute(
+            text(
+                """
             SELECT ms.id, ms.name, ms.created_at,
                    mv.id AS version_id, mv.version, mv.created_at AS version_created_at,
                    (SELECT count(*) FROM manual_set_images x WHERE x.manual_set_version_id = mv.id) AS images,
@@ -112,13 +131,22 @@ def list_manual_sets(db: Session) -> list[dict[str, Any]]:
             LEFT JOIN manual_set_versions mv ON mv.manual_set_id = ms.id
             ORDER BY ms.name, mv.version
             """
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     grouped: dict[str, dict[str, Any]] = {}
     for r in rows:
         entry = grouped.setdefault(
-            r["name"], {"id": r["id"], "name": r["name"], "created_at": r["created_at"], "versions": []}
+            r["name"],
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "created_at": r["created_at"],
+                "versions": [],
+            },
         )
         if r["version_id"] is not None:
             entry["versions"].append(
@@ -135,7 +163,7 @@ def list_manual_sets(db: Session) -> list[dict[str, Any]]:
     return list(grouped.values())
 
 
-def resolve_version(db: Session, manual_set: str, version: str) -> Optional[int]:
+def resolve_version(db: Session, manual_set: str, version: str) -> int | None:
     return db.execute(
         select(m.ManualSetVersion.id)
         .join(m.ManualSet, m.ManualSet.id == m.ManualSetVersion.manual_set_id)
@@ -151,7 +179,7 @@ def parse_ref(ref: str) -> tuple[str, str]:
     """
     name, _, version = ref.rpartition("@")
     if not name or not version:
-        raise SpecError(f"格式應為 name@version（例如 pneumonia@V1），收到 {ref!r}")
+        raise SpecError(f"expected name@version (e.g. pneumonia@V1), got {ref!r}")
     return name, version
 
 
@@ -180,7 +208,7 @@ def import_list_sha256(names: Iterable[str]) -> str:
 
 
 def register_import_list(
-    db: Session, names: Iterable[str], source_note: Optional[str] = None
+    db: Session, names: Iterable[str], source_note: str | None = None
 ) -> tuple[str, bool]:
     """把清單存進資料庫，回傳 (sha256, 是否為新建)。
 
@@ -188,7 +216,7 @@ def register_import_list(
     """
     normalized = normalize_file_names(names)
     if not normalized:
-        raise SpecError("清單是空的，沒有東西可以註冊")
+        raise SpecError("the list is empty; nothing to register")
     digest = import_list_sha256(normalized)
 
     if db.get(m.ManualSetImportList, digest) is not None:
@@ -202,21 +230,25 @@ def register_import_list(
     return digest, True
 
 
-def get_import_list(db: Session, sha256: str) -> Optional[list[str]]:
+def get_import_list(db: Session, sha256: str) -> list[str] | None:
     row = db.get(m.ManualSetImportList, sha256)
     return list(row.file_names) if row else None
 
 
 def list_import_lists(db: Session, limit: int = 50) -> list[dict[str, Any]]:
-    rows = db.execute(
-        text(
-            """
+    rows = (
+        db.execute(
+            text(
+                """
             SELECT sha256, array_length(file_names, 1) AS n, source_note, created_at
             FROM manual_set_import_lists ORDER BY created_at DESC LIMIT :limit
             """
-        ),
-        {"limit": limit},
-    ).mappings().all()
+            ),
+            {"limit": limit},
+        )
+        .mappings()
+        .all()
+    )
     return [dict(r) for r in rows]
 
 
@@ -237,26 +269,39 @@ def load_spec(db: Session, version_id: int) -> dict[str, Any]:
       missing   資料庫說有，物件儲存找不到（被刪了，或 bucket 不對）
       modified  檔案在，但內容跟指紋對不起來（被人改過）
     """
-    row = db.execute(
-        text(
-            """
+    row = (
+        db.execute(
+            text(
+                """
             SELECT ms.name AS manual_set, mv.version, mv.spec_sha256
             FROM manual_set_versions mv JOIN manual_sets ms ON ms.id = mv.manual_set_id
             WHERE mv.id = :vid
             """
-        ),
-        {"vid": version_id},
-    ).mappings().one()
+            ),
+            {"vid": version_id},
+        )
+        .mappings()
+        .one()
+    )
 
     key = spec_key(row["manual_set"], row["version"])
     if row["spec_sha256"] is None:
-        return {"status": "none", "yaml": None, "key": key, "sha256": None, "expected": None}
+        return {
+            "status": "none",
+            "yaml": None,
+            "key": key,
+            "sha256": None,
+            "expected": None,
+        }
 
     yaml_text = get_store().get_spec(row["manual_set"], row["version"])
     if yaml_text is None:
         return {
-            "status": "missing", "yaml": None, "key": key,
-            "sha256": None, "expected": row["spec_sha256"],
+            "status": "missing",
+            "yaml": None,
+            "key": key,
+            "sha256": None,
+            "expected": row["spec_sha256"],
         }
 
     actual = BuildSpec.from_yaml(yaml_text).sha256()
@@ -270,7 +315,7 @@ def load_spec(db: Session, version_id: int) -> dict[str, Any]:
 
 
 def load_spec_from(
-    db: Session, token: str, on_warning: Optional[Callable[[str], None]] = None
+    db: Session, token: str, on_warning: Callable[[str], None] | None = None
 ) -> BuildSpec:
     """把使用者給的東西解析成一份 spec。
 
@@ -285,11 +330,11 @@ def load_spec_from(
         # 檔案，其實不是，而且開了 erasure coding 之後資料還會散在多顆碟上。
         if (path / "xl.meta").exists():
             raise SpecError(
-                f"{path} 是 MinIO 的內部儲存目錄，不是檔案——物件在磁碟上長這樣，"
-                "不能直接讀。請改用 `load <manual-set>@<版本>`，或先 "
-                "`cxr spec <manual-set>@<版本> -o <檔名>` 撈出來。"
+                f"{path} is MinIO's internal storage directory, not a file — that is how an object "
+                "looks on disk, and it cannot be read directly. Use `load <manual-set>@<version>` "
+                "instead, or save it first with `cxr spec <manual-set>@<version> -o <file>`."
             )
-        raise SpecError(f"{path} 是一個目錄，不是 spec 檔")
+        raise SpecError(f"{path} is a directory, not a spec file")
 
     if path.exists():
         try:
@@ -297,24 +342,24 @@ def load_spec_from(
         except SpecError:
             raise
         except Exception as exc:
-            raise SpecError(f"{path} 不是一份合法的 spec：\n{exc}") from exc
+            raise SpecError(f"{path} is not a valid spec:\n{exc}") from exc
 
     if "@" not in token:
         if "/annotations/" in token:
             raise SpecError(
-                f"找不到 {token}。看起來你在指物件儲存上的路徑——"
-                "那個位置是算出來的，直接給 `<manual-set>@<版本>` 就好。"
+                f"{token} not found. It looks like a path in object storage — "
+                "that location is computed, so just give `<manual-set>@<version>`."
             )
-        raise SpecError(f"找不到 {token}（給一個 YAML 檔的路徑，或 manual-set@版本）")
+        raise SpecError(f"{token} not found (give a path to a YAML file, or manual-set@version)")
 
     manual_set, version = parse_ref(token)
     version_id = resolve_version(db, manual_set, version)
     if version_id is None:
-        raise SpecError(f"找不到 {token}（用 `cxr ls manual-sets` 看有哪些）")
+        raise SpecError(f"{token} not found (`cxr ls manual-sets` lists what exists)")
 
     loaded = load_spec(db, version_id)
     if loaded["yaml"] is None:
-        raise SpecError(f"{token}：{_spec_unavailable(loaded)}")
+        raise SpecError(f"{token}: {_spec_unavailable(loaded)}")
     if loaded["status"] == "modified" and on_warning:
         # 使用者以為自己在基於 V1 調整，但那個基礎已經跟當初不一樣了
         on_warning(_spec_unavailable(loaded))
@@ -322,48 +367,61 @@ def load_spec_from(
 
 
 def version_summary(db: Session, version_id: int) -> dict[str, Any]:
-    head = db.execute(
-        text(
-            """
+    head = (
+        db.execute(
+            text(
+                """
             SELECT ms.name AS manual_set, mv.version, mv.created_at, mv.id AS version_id,
                    mv.created_by_name, mv.created_by_email, mv.spec_sha256
             FROM manual_set_versions mv JOIN manual_sets ms ON ms.id = mv.manual_set_id
             WHERE mv.id = :vid
             """
-        ),
-        {"vid": version_id},
-    ).mappings().one()
+            ),
+            {"vid": version_id},
+        )
+        .mappings()
+        .one()
+    )
 
-    counts = db.execute(
-        text(
-            """
+    counts = (
+        db.execute(
+            text(
+                """
             SELECT
               (SELECT count(*) FROM manual_set_images WHERE manual_set_version_id = :vid) AS images,
               (SELECT count(*) FROM manual_set_cls_annotations WHERE manual_set_version_id = :vid) AS cls,
               (SELECT count(*) FROM manual_set_det_annotations WHERE manual_set_version_id = :vid) AS det
             """
-        ),
-        {"vid": version_id},
-    ).mappings().one()
+            ),
+            {"vid": version_id},
+        )
+        .mappings()
+        .one()
+    )
 
-    by_source = db.execute(
-        text(
-            """
-            SELECT os.name || '@' || ib.version AS source, count(*) AS n
+    composition = (
+        db.execute(
+            text(
+                """
+            SELECT os.name AS original_set, ib.version, count(*) AS images
             FROM manual_set_images msi
             JOIN images i ON i.id = msi.image_id
             JOIN image_batches ib ON ib.id = i.image_batch_id
             JOIN original_sets os ON os.id = ib.original_set_id
             WHERE msi.manual_set_version_id = :vid
-            GROUP BY 1 ORDER BY n DESC
+            GROUP BY 1, 2 ORDER BY 1, 2
             """
-        ),
-        {"vid": version_id},
-    ).mappings().all()
+            ),
+            {"vid": version_id},
+        )
+        .mappings()
+        .all()
+    )
 
-    by_target = db.execute(
-        text(
-            """
+    by_target = (
+        db.execute(
+            text(
+                """
             SELECT tc.name AS target, count(*) AS n
             FROM manual_set_cls_annotations msa
             JOIN cls_annotations a ON a.id = msa.cls_annotation_id
@@ -374,13 +432,17 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
             WHERE msa.manual_set_version_id = :vid
             GROUP BY 1 ORDER BY n DESC
             """
-        ),
-        {"vid": version_id},
-    ).mappings().all()
+            ),
+            {"vid": version_id},
+        )
+        .mappings()
+        .all()
+    )
 
-    subjects = db.execute(
-        text(
-            """
+    subjects = (
+        db.execute(
+            text(
+                """
             -- 欄位名要跟 session/analyzer.py 的 summarize() 一致：
             -- 同一個概念在兩個地方叫不同名字，讀的人遲早會拿錯鍵
             SELECT count(DISTINCT s.subject_id) AS distinct,
@@ -389,13 +451,17 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
             LEFT JOIN image_subjects s ON s.image_id = msi.image_id
             WHERE msi.manual_set_version_id = :vid
             """
-        ),
-        {"vid": version_id},
-    ).mappings().one()
+            ),
+            {"vid": version_id},
+        )
+        .mappings()
+        .one()
+    )
 
-    mappings = db.execute(
-        text(
-            """
+    mappings = (
+        db.execute(
+            text(
+                """
             SELECT tc.name AS target, os.name || '@' || ab.version || ':' || c.name AS local
             FROM manual_set_category_mappings cm
             JOIN manual_set_target_categories tc ON tc.id = cm.target_category_id
@@ -405,13 +471,17 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
             WHERE cm.manual_set_version_id = :vid
             ORDER BY tc.name, local
             """
-        ),
-        {"vid": version_id},
-    ).mappings().all()
+            ),
+            {"vid": version_id},
+        )
+        .mappings()
+        .all()
+    )
 
-    category_distribution = db.execute(
-        text(
-            """
+    category_distribution = (
+        db.execute(
+            text(
+                """
             -- 每個 target category 一列：這個版本對這個標籤各知道多少。
             -- cls 數的是「影像」，det 數的是「框」——一張片可以有好幾個框，
             -- 但同一張片對同一個 category 只會有一筆 cls（conflict_resolve
@@ -456,9 +526,12 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
             WHERE tc.manual_set_version_id = :vid
             ORDER BY tc.name
             """
-        ),
-        {"vid": version_id, "total": counts["images"]},
-    ).mappings().all()
+            ),
+            {"vid": version_id, "total": counts["images"]},
+        )
+        .mappings()
+        .all()
+    )
 
     grouped_mappings: dict[str, list[str]] = {}
     for row in mappings:
@@ -469,7 +542,12 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
     return {
         **dict(head),
         **dict(counts),
-        "by_source": {r["source"]: r["n"] for r in by_source},
+        "by_source": {
+            f"{r['original_set']}@{r['version']}": r["images"]
+            for r in sorted(composition, key=lambda r: -r["images"])
+        },
+        # the same rows split into columns, for the __meta__.md composition table
+        "composition": [dict(r) for r in composition],
         "by_target_category": {r["target"]: r["n"] for r in by_target},
         "subjects": dict(subjects),
         "category_mappings": grouped_mappings,
@@ -481,10 +559,178 @@ def version_summary(db: Session, version_id: int) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# original-set batches, for their __meta__.md
+# ---------------------------------------------------------------------------
+
+
+def batch_id(db: Session, kind: str, original_set: str, version: str) -> int | None:
+    """An image or annotation batch by name@version; kind is 'image' or 'annotation'."""
+    return db.execute(
+        text(
+            """
+            SELECT batch_id FROM v_batches
+            WHERE batch_kind = :kind AND original_set_name = :name AND version = :version
+            """
+        ),
+        {"kind": kind, "name": original_set, "version": version},
+    ).scalar_one_or_none()
+
+
+def _object_dtype(store, key: str) -> str | None:
+    """What an image decodes to. A PNG says so in its first 25 bytes; any
+    other format has to be downloaded and decoded."""
+    head = store.get_head(key, PNG_HEADER_BYTES)
+    if head is None:
+        return None
+    if head.startswith(PNG_SIGNATURE):
+        return png_dtype(head)
+    payload = store.get(key)
+    if payload is None:
+        return None
+    import cv2
+    import numpy as np
+
+    image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_UNCHANGED)
+    return str(image.dtype) if image is not None else None
+
+
+def image_batch_stats(db: Session, batch_id: int, sample: int = 50) -> dict[str, Any]:
+    """What an image batch's __meta__.md states about its files.
+
+    Counts, extensions and resolutions come from the rows. The data type is
+    not in the database, so it is read from the objects themselves; `sample`
+    bounds how many (spread evenly across the batch), 0 reads every one.
+    """
+    rows = (
+        db.execute(
+            text(
+                """
+            SELECT os.name AS original_set, ib.version, i.file_name, i.width, i.height
+            FROM images i
+            JOIN image_batches ib ON ib.id = i.image_batch_id
+            JOIN original_sets os ON os.id = ib.original_set_id
+            WHERE i.image_batch_id = :b
+            ORDER BY i.file_name
+            """
+            ),
+            {"b": batch_id},
+        )
+        .mappings()
+        .all()
+    )
+
+    picked = list(rows)
+    if 0 < sample < len(rows):
+        picked = [rows[i * len(rows) // sample] for i in range(sample)]
+    store = get_store()
+    dtypes: Counter[str] = Counter()
+    unreadable: list[str] = []
+    for r in picked:
+        key = object_key_for_image(r["original_set"], r["version"], r["file_name"])
+        dtype = _object_dtype(store, key)
+        if dtype is None:
+            unreadable.append(r["file_name"])
+        else:
+            dtypes[dtype] += 1
+
+    return {
+        "images": len(rows),
+        "extensions": dict(
+            Counter(Path(r["file_name"]).suffix.lower() or "(none)" for r in rows)
+        ),
+        "sizes": dict(Counter((r["width"], r["height"]) for r in rows)),
+        "dtypes": dict(dtypes),
+        "dtype_checked": sum(dtypes.values()),
+        "unreadable": unreadable,
+    }
+
+
+def annotation_batch_stats(db: Session, batch_id: int) -> dict[str, Any]:
+    """What an annotation batch's __meta__.md states, counted from its rows.
+
+    Its images are the ones it annotates: the database keeps no list of images
+    a batch looked at without labelling. Per category, cls counts images with
+    the same definitions as `cxr show` (POS score > 0, NEG score = 0, UNKNOWN
+    the batch's images with no cls row for the category); det counts boxes.
+    """
+    totals = (
+        db.execute(
+            text(
+                """
+            WITH imgs AS (
+                SELECT image_id FROM cls_annotations WHERE annotation_batch_id = :b
+                UNION
+                SELECT image_id FROM det_annotations WHERE annotation_batch_id = :b
+            )
+            SELECT
+              (SELECT count(*) FROM imgs) AS images,
+              (SELECT count(*) FROM categories WHERE annotation_batch_id = :b) AS categories,
+              (SELECT count(DISTINCT annotator_id) FROM (
+                   SELECT annotator_id FROM cls_annotations WHERE annotation_batch_id = :b
+                   UNION ALL
+                   SELECT annotator_id FROM det_annotations WHERE annotation_batch_id = :b
+               ) a) AS annotators,
+              (SELECT count(DISTINCT i.license_id)
+                 FROM images i JOIN imgs ON imgs.image_id = i.id) AS licenses,
+              (SELECT count(*) FROM cls_annotations WHERE annotation_batch_id = :b) AS cls,
+              (SELECT count(*) FROM det_annotations WHERE annotation_batch_id = :b) AS det
+            """
+            ),
+            {"b": batch_id},
+        )
+        .mappings()
+        .one()
+    )
+
+    distribution = (
+        db.execute(
+            text(
+                """
+            SELECT c.id, c.name,
+                   count(DISTINCT a.image_id) FILTER (WHERE a.score > 0) AS cls_pos,
+                   count(DISTINCT a.image_id) FILTER (WHERE a.score = 0) AS cls_neg,
+                   count(DISTINCT a.image_id) AS cls_any,
+                   (SELECT count(*) FROM det_annotations d
+                     WHERE d.category_id = c.id) AS det_boxes
+            FROM categories c
+            LEFT JOIN cls_annotations a ON a.category_id = c.id
+            WHERE c.annotation_batch_id = :b
+            GROUP BY c.id, c.name
+            ORDER BY c.name
+            """
+            ),
+            {"b": batch_id},
+        )
+        .mappings()
+        .all()
+    )
+
+    return {
+        **dict(totals),
+        "distribution": [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "cls_pos": r["cls_pos"],
+                "cls_neg": r["cls_neg"],
+                "cls_unknown": totals["images"] - r["cls_any"],
+                "det_boxes": r["det_boxes"],
+            }
+            for r in distribution
+        ],
+    }
+
+
 def list_version_images(
-    db: Session, version_id: int, *, limit: int = 60, offset: int = 0,
-    search: Optional[str] = None, target_category: Optional[str] = None,
-    source: Optional[str] = None,
+    db: Session,
+    version_id: int,
+    *,
+    limit: int = 60,
+    offset: int = 0,
+    search: str | None = None,
+    target_category: str | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
     where = ["msi.manual_set_version_id = :vid"]
     params: dict[str, Any] = {"vid": version_id, "limit": limit, "offset": offset}
@@ -522,9 +768,10 @@ def list_version_images(
         params,
     ).scalar_one()
 
-    rows = db.execute(
-        text(
-            f"""
+    rows = (
+        db.execute(
+            text(
+                f"""
             SELECT i.id, i.file_name, i.width, i.height, i.blake3_hash, i.date_captured,
                    os.name AS original_set, ib.version AS batch_version,
                    s.subject_id, l.name AS license,
@@ -550,14 +797,22 @@ def list_version_images(
             ORDER BY os.name, i.file_name
             LIMIT :limit OFFSET :offset
             """
-        ),
-        params,
-    ).mappings().all()
+            ),
+            params,
+        )
+        .mappings()
+        .all()
+    )
 
-    return {"total": total, "offset": offset, "limit": limit, "items": [dict(r) for r in rows]}
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": [dict(r) for r in rows],
+    }
 
 
-def resolve_image(db: Session, token: str) -> Optional[int]:
+def resolve_image(db: Session, token: str) -> int | None:
     """`123`、`original_set/版本/檔名`、或裸檔名 → image_id。
 
     純數字當 id；其餘走檔名查詢。檔名只在 image_batch 內唯一，所以裸檔名
@@ -590,10 +845,13 @@ def resolve_image(db: Session, token: str) -> Optional[int]:
     return matches[0]
 
 
-def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -> dict[str, Any]:
-    head = db.execute(
-        text(
-            """
+def image_detail(
+    db: Session, image_id: int, version_id: int | None = None
+) -> dict[str, Any]:
+    head = (
+        db.execute(
+            text(
+                """
             SELECT i.id, i.file_name, i.width, i.height, i.blake3_hash, i.date_captured,
                    os.name AS original_set, ib.version AS batch_version,
                    s.subject_id, l.name AS license
@@ -604,9 +862,12 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
             LEFT JOIN licenses l ON l.id = i.license_id
             WHERE i.id = :iid
             """
-        ),
-        {"iid": image_id},
-    ).mappings().one()
+            ),
+            {"iid": image_id},
+        )
+        .mappings()
+        .one()
+    )
 
     ann_filter = ""
     params: dict[str, Any] = {"iid": image_id}
@@ -615,9 +876,10 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
                                       WHERE manual_set_version_id = :vid)"""
         params["vid"] = version_id
 
-    cls = db.execute(
-        text(
-            f"""
+    cls = (
+        db.execute(
+            text(
+                f"""
             SELECT a.id, c.name AS category, os.name || '@' || ab.version AS source,
                    an.name AS annotator, a.score
             FROM cls_annotations a
@@ -628,16 +890,20 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
             WHERE a.image_id = :iid {ann_filter}
             ORDER BY a.id
             """
-        ),
-        params,
-    ).mappings().all()
+            ),
+            params,
+        )
+        .mappings()
+        .all()
+    )
 
     det_filter = ann_filter.replace("cls_annotation_id", "det_annotation_id").replace(
         "manual_set_cls_annotations", "manual_set_det_annotations"
     )
-    det = db.execute(
-        text(
-            f"""
+    det = (
+        db.execute(
+            text(
+                f"""
             SELECT a.id, c.name AS category, os.name || '@' || ab.version AS source,
                    an.name AS annotator, a.score, a.bbox, a.iscrowd
             FROM det_annotations a
@@ -648,13 +914,17 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
             WHERE a.image_id = :iid {det_filter}
             ORDER BY a.id
             """
-        ),
-        params,
-    ).mappings().all()
+            ),
+            params,
+        )
+        .mappings()
+        .all()
+    )
 
-    duplicates = db.execute(
-        text(
-            """
+    duplicates = (
+        db.execute(
+            text(
+                """
             SELECT i.id, i.file_name, os.name AS original_set, ib.version AS batch_version
             FROM images i
             JOIN image_batches ib ON ib.id = i.image_batch_id
@@ -663,13 +933,17 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
               AND i.id <> :iid AND i.blake3_hash IS NOT NULL
             ORDER BY os.name, i.file_name
             """
-        ),
-        {"iid": image_id},
-    ).mappings().all()
+            ),
+            {"iid": image_id},
+        )
+        .mappings()
+        .all()
+    )
 
-    lineage = db.execute(
-        text(
-            """
+    lineage = (
+        db.execute(
+            text(
+                """
             SELECT 'parent' AS direction, p.id, p.file_name, os.name AS original_set, ib.version
             FROM image_lineage l
             JOIN images p ON p.id = l.parent_image_id
@@ -684,14 +958,18 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
             JOIN original_sets os ON os.id = ib.original_set_id
             WHERE l.parent_image_id = :iid
             """
-        ),
-        {"iid": image_id},
-    ).mappings().all()
+            ),
+            {"iid": image_id},
+        )
+        .mappings()
+        .all()
+    )
 
     # 這張圖被哪些 manual-set 用了——刪除、查洩漏、追責任時都會想知道
-    used_by = db.execute(
-        text(
-            """
+    used_by = (
+        db.execute(
+            text(
+                """
             SELECT ms.name, mv.version,
                    (SELECT count(*) FROM manual_set_cls_annotations a
                      WHERE a.manual_set_version_id = mv.id AND a.image_id = :iid)
@@ -703,9 +981,12 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
             WHERE msi.image_id = :iid
             ORDER BY ms.name, mv.version
             """
-        ),
-        {"iid": image_id},
-    ).mappings().all()
+            ),
+            {"iid": image_id},
+        )
+        .mappings()
+        .all()
+    )
 
     return {
         **dict(head),
@@ -729,7 +1010,7 @@ def image_detail(db: Session, image_id: int, version_id: Optional[int] = None) -
 
 
 def describe_deletion(
-    db: Session, manual_set: str, version: Optional[str] = None
+    db: Session, manual_set: str, version: str | None = None
 ) -> dict[str, Any]:
     """列出將被刪除的版本與各自的內容。version=None 表示整個 manual-set。"""
     ms = db.execute(select(m.ManualSet).filter_by(name=manual_set)).scalar_one_or_none()
@@ -745,18 +1026,22 @@ def describe_deletion(
 
     detail = []
     for v in versions:
-        counts = db.execute(
-            text(
-                """
+        counts = (
+            db.execute(
+                text(
+                    """
                 SELECT
                   (SELECT count(*) FROM manual_set_images WHERE manual_set_version_id = :v) AS images,
                   (SELECT count(*) FROM manual_set_cls_annotations WHERE manual_set_version_id = :v) AS cls,
                   (SELECT count(*) FROM manual_set_det_annotations WHERE manual_set_version_id = :v) AS det,
                   (SELECT count(*) FROM manual_set_target_categories WHERE manual_set_version_id = :v) AS targets
                 """
-            ),
-            {"v": v.id},
-        ).mappings().one()
+                ),
+                {"v": v.id},
+            )
+            .mappings()
+            .one()
+        )
         spec = load_spec(db, v.id)
         detail.append(
             {
@@ -764,7 +1049,9 @@ def describe_deletion(
                 "version": v.version,
                 "created_at": v.created_at,
                 **dict(counts),
-                "steps": len(BuildSpec.from_yaml(spec["yaml"]).steps) if spec["yaml"] else None,
+                "steps": len(BuildSpec.from_yaml(spec["yaml"]).steps)
+                if spec["yaml"]
+                else None,
                 "spec_sha256": v.spec_sha256,
                 "spec_key": spec["key"] if spec["status"] != "none" else None,
                 "spec_status": spec["status"],
@@ -772,9 +1059,11 @@ def describe_deletion(
             }
         )
 
-    remaining = db.execute(
-        select(m.ManualSetVersion).filter_by(manual_set_id=ms.id)
-    ).scalars().all()
+    remaining = (
+        db.execute(select(m.ManualSetVersion).filter_by(manual_set_id=ms.id))
+        .scalars()
+        .all()
+    )
     return {
         "found": True,
         "manual_set": manual_set,
@@ -786,7 +1075,7 @@ def describe_deletion(
 
 
 def delete_manual_set(
-    db: Session, manual_set: str, version: Optional[str] = None
+    db: Session, manual_set: str, version: str | None = None
 ) -> dict[str, Any]:
     """刪除一個版本或整個 manual-set。
 
@@ -796,13 +1085,13 @@ def delete_manual_set(
     """
     plan = describe_deletion(db, manual_set, version)
     if not plan["found"]:
-        raise SpecError(
-            f"找不到 {manual_set}" + (f"@{version}" if version else "")
-        )
+        raise SpecError(f"{manual_set}" + (f"@{version}" if version else "") + " not found")
 
     if plan["removes_manual_set"]:
         db.execute(
-            m.ManualSet.__table__.delete().where(m.ManualSet.id == plan["manual_set_id"])
+            m.ManualSet.__table__.delete().where(
+                m.ManualSet.id == plan["manual_set_id"]
+            )
         )
     else:
         db.execute(
@@ -820,8 +1109,11 @@ def delete_manual_set(
 
 
 def explain(
-    db: Session, version_id: int, *, image_id: Optional[int] = None,
-    file_name: Optional[str] = None,
+    db: Session,
+    version_id: int,
+    *,
+    image_id: int | None = None,
+    file_name: str | None = None,
 ) -> dict[str, Any]:
     """回答「這張圖是在哪一步、依據什麼規則被選中／排除的」（design_doc §5）。
 
@@ -852,7 +1144,7 @@ def explain(
             _split_image_ref(file_name),
         ).scalar_one_or_none()
     if image_id is None:
-        return {"found": False, "reason": "找不到這張影像"}
+        return {"found": False, "reason": "image not found"}
 
     spec = load_spec(db, version_id)
     if spec["yaml"] is None:
@@ -865,21 +1157,27 @@ def explain(
     tracked += [
         ("cls_annotation", i)
         for i in db.execute(
-            text("SELECT id FROM cls_annotations WHERE image_id = :iid"), {"iid": image_id}
+            text("SELECT id FROM cls_annotations WHERE image_id = :iid"),
+            {"iid": image_id},
         ).scalars()
     ]
     tracked += [
         ("det_annotation", i)
         for i in db.execute(
-            text("SELECT id FROM det_annotations WHERE image_id = :iid"), {"iid": image_id}
+            text("SELECT id FROM det_annotations WHERE image_id = :iid"),
+            {"iid": image_id},
         ).scalars()
     ]
 
     def contains(cand, kind: str, eid: int) -> bool:
-        pool = {"image": cand.images, "cls_annotation": cand.cls, "det_annotation": cand.det}
+        pool = {
+            "image": cand.images,
+            "cls_annotation": cand.cls,
+            "det_annotation": cand.det,
+        }
         return eid in pool[kind]
 
-    def category_of(kind: str, eid: int) -> Optional[int]:
+    def category_of(kind: str, eid: int) -> int | None:
         """這筆標註屬於哪個 local category。
 
         catalog 只載入這份 spec 用到的 annotation_batch，所以這張圖在別的
@@ -906,9 +1204,7 @@ def explain(
         current = execution.results[report.step_id]
         inputs = [execution.results[dep] for dep in report.input_step_ids]
         # 這一步為什麼這樣做——由 op 產生的說明，只有變化的 entity 才有
-        reasons = {
-            (d.entity_kind, d.entity_id): d for d in report.decisions
-        }
+        reasons = {(d.entity_kind, d.entity_id): d for d in report.decisions}
 
         for kind, eid in tracked:
             was_in = any(contains(c, kind, eid) for c in inputs)  # 葉節點沒有 input
@@ -965,13 +1261,13 @@ def explain(
 def _spec_unavailable(spec: dict[str, Any]) -> str:
     """把 load_spec 的狀態翻成一句能照著處理的話。"""
     if spec["status"] == "none":
-        return "這個版本沒有 spec（是用 scripts/tools/ 匯入的，不是 build 出來的）"
+        return "this version has no spec (it was imported with scripts/tools/, not built)"
     if spec["status"] == "missing":
-        return f"物件儲存上找不到 {spec['key']}——spec 被刪掉了，這個版本已經重現不出來"
+        return f"{spec['key']} is missing from object storage — the spec was deleted and this version can no longer be reproduced"
     return (
-        f"{spec['key']} 的內容跟建構當時對不起來"
-        f"（現在 {spec['sha256'][:16]}…，當初 {spec['expected'][:16]}…）——"
-        "有人改過這份 spec，重跑它不保證得到同一個版本"
+        f"{spec['key']} no longer matches what was built"
+        f" (now {spec['sha256'][:16]}…, originally {spec['expected'][:16]}…) — "
+        "someone edited this spec, so re-running it is not guaranteed to give the same version"
     )
 
 
@@ -992,9 +1288,10 @@ def build_history(db: Session, limit: int = 30) -> list[dict[str, Any]]:
     這裡不顯示步驟數：spec 本體在物件儲存，數步驟等於一個版本抓一次檔案，
     列表沒必要付這個代價。要看步驟就 `cxr show` 或 `cxr spec` 單看一個版本。
     """
-    rows = db.execute(
-        text(
-            """
+    rows = (
+        db.execute(
+            text(
+                """
             SELECT mv.id AS version_id, mv.version, mv.created_at, mv.spec_sha256,
                    mv.created_by_name, mv.created_by_email,
                    ms.name AS manual_set,
@@ -1004,9 +1301,12 @@ def build_history(db: Session, limit: int = 30) -> list[dict[str, Any]]:
             JOIN manual_sets ms ON ms.id = mv.manual_set_id
             ORDER BY mv.id DESC LIMIT :limit
             """
-        ),
-        {"limit": limit},
-    ).mappings().all()
+            ),
+            {"limit": limit},
+        )
+        .mappings()
+        .all()
+    )
     return [dict(r) for r in rows]
 
 
@@ -1062,18 +1362,22 @@ def diff_versions(db: Session, left_id: int, right_id: int) -> dict[str, Any]:
     def describe(ids: set[int], limit: int = 20) -> list[str]:
         if not ids:
             return []
-        rows = db.execute(
-            text(
-                """
+        rows = (
+            db.execute(
+                text(
+                    """
                 SELECT os.name || '/' || ib.version || '/' || i.file_name AS ref
                 FROM images i
                 JOIN image_batches ib ON ib.id = i.image_batch_id
                 JOIN original_sets os ON os.id = ib.original_set_id
                 WHERE i.id = ANY(:ids) ORDER BY ref LIMIT :limit
                 """
-            ),
-            {"ids": list(ids), "limit": limit},
-        ).scalars().all()
+                ),
+                {"ids": list(ids), "limit": limit},
+            )
+            .scalars()
+            .all()
+        )
         return list(rows)
 
     # 同一張圖留著、但它的標註集合變了
@@ -1124,9 +1428,10 @@ def diff_versions(db: Session, left_id: int, right_id: int) -> dict[str, Any]:
 
 def duplicate_report(db: Session, version_ids: list[int]) -> dict[str, Any]:
     """跨 manual-set 版本的 blake3 查重——train/val 切分的 leakage 防禦。"""
-    rows = db.execute(
-        text(
-            """
+    rows = (
+        db.execute(
+            text(
+                """
             SELECT i.blake3_hash,
                    array_agg(DISTINCT msi.manual_set_version_id) AS versions,
                    array_agg(DISTINCT os.name || '/' || ib.version || '/' || i.file_name) AS refs,
@@ -1140,14 +1445,18 @@ def duplicate_report(db: Session, version_ids: list[int]) -> dict[str, Any]:
             GROUP BY i.blake3_hash
             HAVING count(DISTINCT msi.manual_set_version_id) > 1
             """
-        ),
-        {"vids": version_ids},
-    ).mappings().all()
+            ),
+            {"vids": version_ids},
+        )
+        .mappings()
+        .all()
+    )
 
     # 同一位病患橫跨多個版本——內容不同但仍然是 leakage
-    subject_rows = db.execute(
-        text(
-            """
+    subject_rows = (
+        db.execute(
+            text(
+                """
             SELECT s.subject_id, array_agg(DISTINCT msi.manual_set_version_id) AS versions,
                    count(*) AS images
             FROM manual_set_images msi
@@ -1156,9 +1465,12 @@ def duplicate_report(db: Session, version_ids: list[int]) -> dict[str, Any]:
             GROUP BY s.subject_id
             HAVING count(DISTINCT msi.manual_set_version_id) > 1
             """
-        ),
-        {"vids": version_ids},
-    ).mappings().all()
+            ),
+            {"vids": version_ids},
+        )
+        .mappings()
+        .all()
+    )
 
     return {
         "version_ids": version_ids,

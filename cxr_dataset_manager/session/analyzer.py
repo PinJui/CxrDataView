@@ -9,7 +9,7 @@ image_id 的張數（讓使用者知道病患層級保證的強度）。
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Optional
+from typing import Any
 
 from cxr_dataset_manager.core.ops import find_conflicts, local_categories_in
 from cxr_dataset_manager.core.types import CandidateSet, Catalog
@@ -81,8 +81,8 @@ def _category_distribution(
 def summarize(
     catalog: Catalog,
     cand: CandidateSet,
-    previous: Optional[CandidateSet] = None,
-    step_stats: Optional[dict[str, Any]] = None,
+    previous: CandidateSet | None = None,
+    step_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     images = cand.images
     subjects = Counter()
@@ -215,10 +215,14 @@ def category_report(catalog: Catalog, cand: CandidateSet) -> dict[str, Any]:
         "mapped": mapped,
         "unmapped": unmapped,
         "targets": [
-            {"name": name, "local_categories": [
-                catalog.category(c).ref for c in sorted(present)
-                if cand.category_targets.get(c) == name
-            ]}
+            {
+                "name": name,
+                "local_categories": [
+                    catalog.category(c).ref
+                    for c in sorted(present)
+                    if cand.category_targets.get(c) == name
+                ],
+            }
             for name in sorted(targets)
         ],
         "targets_without_source": sorted(declared - set(targets)),

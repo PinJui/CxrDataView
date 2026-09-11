@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import operator
 import re
 from typing import Any
 
@@ -82,32 +83,41 @@ def compile_predicate(expression: str) -> ast.Expression:
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as exc:  # pragma: no cover - 訊息就是全部價值
-        raise SpecError(f"predicate 語法錯誤: {expression!r} ({exc.msg})") from exc
+        raise SpecError(f"predicate syntax error: {expression!r} ({exc.msg})") from exc
 
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODES):
             raise SpecError(
-                f"predicate 不支援的語法 {type(node).__name__}: {expression!r}"
-                "（只允許比較、and/or/not、in、regex()）"
+                f"predicate uses unsupported syntax {type(node).__name__}: {expression!r}"
+                " (only comparisons, and/or/not, in and regex() are allowed)"
             )
-        if isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name) or node.func.id != "regex":
-                raise SpecError("predicate 只允許呼叫 regex(field, pattern)")
-        if isinstance(node, ast.Name) and node.id not in _FIELDS | {"regex", "None", "True", "False"}:
+        if isinstance(node, ast.Call) and (
+            not isinstance(node.func, ast.Name) or node.func.id != "regex"
+        ):
+            raise SpecError("a predicate may only call regex(field, pattern)")
+        if isinstance(node, ast.Name) and node.id not in _FIELDS | {
+            "regex",
+            "None",
+            "True",
+            "False",
+        }:
             raise SpecError(
-                f"predicate 未知欄位 {node.id!r}；可用欄位: {', '.join(sorted(_FIELDS))}"
+                f"predicate: unknown field {node.id!r}; available fields: {', '.join(sorted(_FIELDS))}"
             )
     return tree
 
 
-def row_of(meta: ImageMeta, labels: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def row_of(meta: ImageMeta, labels: dict[str, Any] | None = None) -> dict[str, Any]:
     """把一張影像攤成 predicate 看得到的欄位。
 
     labels 由呼叫端事先算好（見 ops._label_context）——每張圖都去掃一次
     候選集合的話，一個 filter 就是 O(影像數 × 標註數)。
     """
     return {
-        **(labels or {"labels": [], "targets": [], "annotators": [], "n_annotations": 0}),
+        **(
+            labels
+            or {"labels": [], "targets": [], "annotators": [], "n_annotations": 0}
+        ),
         "file_name": meta.file_name,
         "original_set": meta.original_set_name,
         "batch_version": meta.batch_version,
@@ -166,26 +176,28 @@ def _eval(node: ast.AST, row: dict[str, Any]) -> Any:
                 if left is None or right is None:
                     # NULL 比較一律 false（跟 SQL 的三值邏輯一致），
                     # 但 == None / != None 走上面的 Is/IsNot 分支，仍可判斷
-                    result = (isinstance(op, ast.NotEq) and left != right)
+                    result = isinstance(op, ast.NotEq) and left != right
                 else:
                     lv, rv = _coerce(left, right)
                     result = {
-                        ast.Eq: lambda: lv == rv,
-                        ast.NotEq: lambda: lv != rv,
-                        ast.Lt: lambda: lv < rv,
-                        ast.LtE: lambda: lv <= rv,
-                        ast.Gt: lambda: lv > rv,
-                        ast.GtE: lambda: lv >= rv,
-                    }[type(op)]()
+                        ast.Eq: operator.eq,
+                        ast.NotEq: operator.ne,
+                        ast.Lt: operator.lt,
+                        ast.LtE: operator.le,
+                        ast.Gt: operator.gt,
+                        ast.GtE: operator.ge,
+                    }[type(op)](lv, rv)
             if not result:
                 return False
             left = right
         return True
-    raise SpecError(f"predicate 求值遇到未支援的節點 {type(node).__name__}")
+    raise SpecError(f"predicate evaluation hit an unsupported node {type(node).__name__}")
 
 
 def evaluate(
-    tree: ast.Expression, catalog: Catalog, image_id: int,
-    labels: Optional[dict[str, Any]] = None,
+    tree: ast.Expression,
+    catalog: Catalog,
+    image_id: int,
+    labels: dict[str, Any] | None = None,
 ) -> bool:
     return bool(_eval(tree, row_of(catalog.image(image_id), labels)))

@@ -2,8 +2,6 @@
 
 import uuid
 
-
-
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -47,16 +45,21 @@ def spec():
 
 
 TRACKED_TABLES = [
-    "manual_sets", "manual_set_versions", "manual_set_images",
-    "manual_set_cls_annotations", "manual_set_det_annotations",
-    "manual_set_target_categories", "manual_set_category_mappings",
+    "manual_sets",
+    "manual_set_versions",
+    "manual_set_images",
+    "manual_set_cls_annotations",
+    "manual_set_det_annotations",
+    "manual_set_target_categories",
+    "manual_set_category_mappings",
 ]
 
 
 def _row_counts(db) -> dict[str, int]:
     db.rollback()
     return {
-        t: db.execute(text(f"SELECT count(*) FROM {t}")).scalar_one() for t in TRACKED_TABLES
+        t: db.execute(text(f"SELECT count(*) FROM {t}")).scalar_one()
+        for t in TRACKED_TABLES
     }
 
 
@@ -143,7 +146,9 @@ def test_provenance_explains_every_dropped_image(db, spec):
         assert trail["found"] and not trail["in_final_set"]
         assert trail["spec_key"] == result.spec_key
         assert trail["spec_status"] == "ok"
-        decisions = [t["decision"] for t in trail["trail"] if t["entity_kind"] == "image"]
+        decisions = [
+            t["decision"] for t in trail["trail"] if t["entity_kind"] == "image"
+        ]
         assert "added" in decisions and "dropped" in decisions
         assert all(t["reason"] for t in trail["trail"]), "每筆裁決都要說得出原因"
     finally:
@@ -154,7 +159,7 @@ def test_version_numbers_are_immutable(db, spec):
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     try:
         build(db, spec, name, "V1", author=TEST_AUTHOR)
-        with pytest.raises(SpecError, match="已經有版本"):
+        with pytest.raises(SpecError, match="already has version"):
             build(db, spec, name, "V1", author=TEST_AUTHOR)
     finally:
         _cleanup(db, name)
@@ -210,11 +215,15 @@ def test_incremental_category_mapping_does_not_destroy_other_sources(db):
     session.union()
     before = session.current.counts()
 
-    session.map_category("aws_images@V1",
-                         {"Pneumonia": "pneumonia", "Normal": "normal", "Effusion": "effusion"})
+    session.map_category(
+        "aws_images@V1",
+        {"Pneumonia": "pneumonia", "Normal": "normal", "Effusion": "effusion"},
+    )
     assert session.current.counts()["det"] == before["det"], "TB 的 det 標註不該被丟掉"
 
-    session.map_category("TB-portal@V1", {"TB": "tb", "Normal": "normal", "Pneumonia": "pneumonia"})
+    session.map_category(
+        "TB-portal@V1", {"TB": "tb", "Normal": "normal", "Pneumonia": "pneumonia"}
+    )
     assert session.current.counts() == before
     assert not session.preview_categories()["unmapped"]
 
@@ -229,7 +238,7 @@ def test_build_refuses_annotations_without_a_target_category(db):
         final: aws
         """
     )
-    with pytest.raises(SpecError, match="沒有對應的 target category"):
+    with pytest.raises(SpecError, match="with no target category"):
         build(db, no_mapping, name, "V1", author=TEST_AUTHOR)
     assert crud.resolve_version(db, name, "V1") is None
 
@@ -283,7 +292,7 @@ def test_build_refuses_a_manual_set_containing_unannotated_images(db):
         final: mapped
         """
     )
-    with pytest.raises(SpecError, match="沒有任何標註"):
+    with pytest.raises(SpecError, match="with no annotation"):
         build(db, spec, name, "V1", author=TEST_AUTHOR)
     assert crud.resolve_version(db, name, "V1") is None
 
@@ -370,7 +379,10 @@ def test_the_builder_is_recorded_on_the_version(db, spec):
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     try:
         result = build(
-            db, spec, name, "V1",
+            db,
+            spec,
+            name,
+            "V1",
             author=Author(name="Jeff Huang", email="jeff@example.com"),
         )
         summary = crud.version_summary(db, result.manual_set_version_id)
@@ -381,7 +393,7 @@ def test_the_builder_is_recorded_on_the_version(db, spec):
 
 def test_committing_without_an_author_is_refused(db, spec):
     name = f"pytest_{uuid.uuid4().hex[:8]}"
-    with pytest.raises(SpecError, match="是誰建的"):
+    with pytest.raises(SpecError, match="who is building"):
         build(db, spec, name, "V1")
     assert crud.resolve_version(db, name, "V1") is None
 
@@ -392,7 +404,9 @@ def test_a_dry_run_needs_no_author(db, spec):
     assert result.counts["images"] > 0
 
 
-@pytest.mark.parametrize("bad", [("", "a@b.c"), ("  ", "a@b.c"), ("me", "not-an-email")])
+@pytest.mark.parametrize(
+    "bad", [("", "a@b.c"), ("  ", "a@b.c"), ("me", "not-an-email")]
+)
 def test_author_details_are_validated(bad):
     with pytest.raises(SpecError):
         Author(name=bad[0], email=bad[1])
@@ -408,26 +422,39 @@ def test_losing_a_version_race_says_who_won(db, spec, monkeypatch):
 
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     try:
-        build(db, spec, name, "V1", author=Author(name="First", email="first@example.com"))
+        build(
+            db, spec, name, "V1", author=Author(name="First", email="first@example.com")
+        )
 
         # 停用預先檢查，模擬「兩個人都通過檢查後才寫入」的競態
-        monkeypatch.setattr(engine_mod, "_assert_version_available", lambda *a, **k: None)
+        monkeypatch.setattr(
+            engine_mod, "_assert_version_available", lambda *a, **k: None
+        )
         with pytest.raises(SpecError) as caught:
-            build(db, spec, name, "V1", author=Author(name="Second", email="second@example.com"))
+            build(
+                db,
+                spec,
+                name,
+                "V1",
+                author=Author(name="Second", email="second@example.com"),
+            )
 
         message = str(caught.value)
         assert "First <first@example.com>" in message
-        assert "換一個版本號" in message
+        assert "another version number" in message
 
         # 輸的那一方不該留下任何殘跡
-        assert db.execute(
-            text(
-                "SELECT count(*) FROM manual_set_versions mv"
-                " JOIN manual_sets ms ON ms.id = mv.manual_set_id"
-                " WHERE ms.name = :n"
-            ),
-            {"n": name},
-        ).scalar_one() == 1
+        assert (
+            db.execute(
+                text(
+                    "SELECT count(*) FROM manual_set_versions mv"
+                    " JOIN manual_sets ms ON ms.id = mv.manual_set_id"
+                    " WHERE ms.name = :n"
+                ),
+                {"n": name},
+            ).scalar_one()
+            == 1
+        )
     finally:
         _cleanup(db, name)
 
@@ -458,9 +485,13 @@ def test_deleting_a_version_leaves_the_source_data_untouched(db, spec):
         ("manual_set_cls_annotations", "manual_set_version_id"),
         ("manual_set_target_categories", "manual_set_version_id"),
     ]:
-        assert db.execute(
-            text(f"SELECT count(*) FROM {table} WHERE {column} = :v"), {"v": version_id}
-        ).scalar_one() == 0, table
+        assert (
+            db.execute(
+                text(f"SELECT count(*) FROM {table} WHERE {column} = :v"),
+                {"v": version_id},
+            ).scalar_one()
+            == 0
+        ), table
 
 
 def test_deleting_the_last_version_removes_the_manual_set_itself(db, spec):
@@ -469,9 +500,12 @@ def test_deleting_the_last_version_removes_the_manual_set_itself(db, spec):
 
     plan = crud.delete_manual_set(db, name, "V1")
     assert plan["removes_manual_set"]
-    assert db.execute(
-        text("SELECT count(*) FROM manual_sets WHERE name = :n"), {"n": name}
-    ).scalar_one() == 0
+    assert (
+        db.execute(
+            text("SELECT count(*) FROM manual_sets WHERE name = :n"), {"n": name}
+        ).scalar_one()
+        == 0
+    )
 
 
 def test_deleting_one_of_several_versions_keeps_the_others(db, spec):
@@ -512,7 +546,7 @@ def test_describe_deletion_warns_about_the_spec(db, spec):
 
 
 def test_deleting_something_that_does_not_exist_fails_cleanly(db):
-    with pytest.raises(SpecError, match="找不到"):
+    with pytest.raises(SpecError, match="not found"):
         crud.delete_manual_set(db, "definitely_not_here", "V1")
 
 
@@ -547,7 +581,9 @@ def test_the_fingerprint_catches_a_spec_that_was_edited_afterwards(db, spec):
     """
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     try:
-        version_id = build(db, spec, name, "V1", author=TEST_AUTHOR).manual_set_version_id
+        version_id = build(
+            db, spec, name, "V1", author=TEST_AUTHOR
+        ).manual_set_version_id
         assert crud.load_spec(db, version_id)["status"] == "ok"
 
         tampered = BuildSpec.from_yaml(get_store().get_spec(name, "V1"))
@@ -557,7 +593,7 @@ def test_the_fingerprint_catches_a_spec_that_was_edited_afterwards(db, spec):
         loaded = crud.load_spec(db, version_id)
         assert loaded["status"] == "modified"
         assert loaded["sha256"] != loaded["expected"]
-        assert "改過" in crud._spec_unavailable(loaded)
+        assert "edited" in crud._spec_unavailable(loaded)
     finally:
         _cleanup(db, name)
         get_store().delete_spec(name, "V1")
@@ -567,16 +603,18 @@ def test_a_missing_spec_is_reported_not_guessed_at(db, spec):
     """spec 被刪掉之後，這個版本就是重現不出來了——要講清楚，不能裝沒事。"""
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     try:
-        version_id = build(db, spec, name, "V1", author=TEST_AUTHOR).manual_set_version_id
+        version_id = build(
+            db, spec, name, "V1", author=TEST_AUTHOR
+        ).manual_set_version_id
         get_store().delete_spec(name, "V1")
 
         loaded = crud.load_spec(db, version_id)
         assert loaded["status"] == "missing" and loaded["yaml"] is None
-        assert "重現不出來" in crud._spec_unavailable(loaded)
+        assert "can no longer be reproduced" in crud._spec_unavailable(loaded)
 
         # cxr why 依賴重跑 spec，沒有 spec 就該說沒有，而不是回一個空結果
         trail = crud.explain(db, version_id, image_id=1)
-        assert not trail["found"] and "重現不出來" in trail["reason"]
+        assert not trail["found"] and "can no longer be reproduced" in trail["reason"]
     finally:
         _cleanup(db, name)
 
@@ -601,7 +639,7 @@ def test_an_imported_version_has_no_spec_and_says_so(db):
 
         loaded = crud.load_spec(db, version_id)
         assert loaded["status"] == "none" and loaded["sha256"] is None
-        assert "匯入" in crud._spec_unavailable(loaded)
+        assert "imported" in crud._spec_unavailable(loaded)
         assert crud.version_summary(db, version_id)["created_by"] == (
             "importer <importer@example.com>"
         )
@@ -622,13 +660,17 @@ def test_category_distribution_counts_images_for_cls_and_boxes_for_det(db, spec)
     """
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     try:
-        version_id = build(db, spec, name, "V1", author=TEST_AUTHOR).manual_set_version_id
+        version_id = build(
+            db, spec, name, "V1", author=TEST_AUTHOR
+        ).manual_set_version_id
         summary = crud.version_summary(db, version_id)
         rows = summary["category_distribution"]
         assert rows, "這份 spec 有 target category，表格不該是空的"
 
         for r in rows:
-            assert r["cls_pos"] + r["cls_neg"] + r["cls_unknown"] == summary["images"], r
+            assert (
+                r["cls_pos"] + r["cls_neg"] + r["cls_unknown"] == summary["images"]
+            ), r
 
         # det 是框數：直接跟資料庫對答案，不靠影像去數
         for r in rows:
@@ -659,8 +701,13 @@ def test_a_zero_score_annotation_is_a_negative_not_a_positive(db, spec):
     """
     name = f"pytest_{uuid.uuid4().hex[:8]}"
     try:
-        version_id = build(db, spec, name, "V1", author=TEST_AUTHOR).manual_set_version_id
-        before = {r["target"]: r for r in crud.version_summary(db, version_id)["category_distribution"]}
+        version_id = build(
+            db, spec, name, "V1", author=TEST_AUTHOR
+        ).manual_set_version_id
+        before = {
+            r["target"]: r
+            for r in crud.version_summary(db, version_id)["category_distribution"]
+        }
         target = next(t for t, r in before.items() if r["cls_pos"] > 0)
 
         # 把該 target 底下的一筆標註打成 0 分（測試結束時 rollback 會還原）
@@ -682,7 +729,10 @@ def test_a_zero_score_annotation_is_a_negative_not_a_positive(db, spec):
             {"vid": version_id, "t": target},
         )
 
-        after = {r["target"]: r for r in crud.version_summary(db, version_id)["category_distribution"]}
+        after = {
+            r["target"]: r
+            for r in crud.version_summary(db, version_id)["category_distribution"]
+        }
         assert after[target]["cls_pos"] == before[target]["cls_pos"] - 1
         assert after[target]["cls_neg"] == before[target]["cls_neg"] + 1
         # 影像有沒有被看過沒變，所以 UNKNOWN 不該動
@@ -702,12 +752,16 @@ def test_a_batch_refuses_a_duplicate_cls_annotation(db):
 
     存兩次不帶任何資訊，只是佔空間，而且會讓所有以標註數為分母的統計失真。
     """
-    row = db.execute(
-        text(
-            "SELECT annotation_batch_id, image_id, category_id, annotator_id, score"
-            " FROM cls_annotations LIMIT 1"
+    row = (
+        db.execute(
+            text(
+                "SELECT annotation_batch_id, image_id, category_id, annotator_id, score"
+                " FROM cls_annotations LIMIT 1"
+            )
         )
-    ).mappings().one()
+        .mappings()
+        .one()
+    )
     with pytest.raises(IntegrityError):
         db.execute(
             text(
@@ -728,15 +782,19 @@ def test_a_duplicate_det_box_is_caught_even_when_its_score_is_null(db):
     （沒有分數也沒有遮罩的框）反而會整批溜過約束——mock data 裡 76 筆 det 的
     segmentation 全是 NULL，也就是一筆都擋不到。約束要寫 NULLS NOT DISTINCT。
     """
-    row = db.execute(
-        text(
-            """
+    row = (
+        db.execute(
+            text(
+                """
             SELECT annotation_batch_id, image_id, category_id, annotator_id,
                    bbox, iscrowd
             FROM det_annotations WHERE segmentation IS NULL LIMIT 1
             """
+            )
         )
-    ).mappings().one()
+        .mappings()
+        .one()
+    )
     params = dict(row) | {"score": None, "segmentation": None}
     db.execute(
         text(

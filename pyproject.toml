@@ -18,6 +18,8 @@ pyyaml = "^6.0"
 blake3 = "^1.0"
 boto3 = "^1.43"
 pillow = "^11.0"
+opencv-python = "^5.0.0.93"
+tqdm = "^4.70.0"
 
 [tool.poetry.group.parquet.dependencies]
 # 只有 scripts/tools/ 的匯入腳本需要；核心不依賴它們

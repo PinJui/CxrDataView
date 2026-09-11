@@ -98,3 +98,47 @@ Open work lives in `TODO.md`; the architecture is in `design_doc.md`.
    the file directly, view renders it wrapped so nothing vanishes on screen
    either, and load reads one back. Redirecting a command's output into a file
    is no longer a supported path; stdout is a display channel.
+
+10. **Importing images could overwrite an object nobody had registered.**
+    `import_image_batch.py` checked for conflicts in the database only, so an
+    object already in the bucket under the same key — left by an earlier run
+    that failed after uploading, or put there by hand — was replaced without a
+    word. `--on-image-exists` now decides, the way `--on-conflict` does for
+    rows: `error` (the default) stops and names them; `skip` leaves the object
+    and does not register the file either, since a row would describe a file
+    it never read; `overwrite` backs the object up first and restores it if
+    the import fails. One listing of the batch's prefix finds them all.
+
+11. **The standard manual-set parquet needed a separate script.**
+    `scripts/tools/export_manual_set_version.py` re-queried what `cxr export`
+    already reads, and is gone: `cxr export name@V1 -f parquet` writes the five
+    parquet files and the version's `__meta__.md` into
+    `<out>/manual-sets/<name>/annotations/<version>/`. Its output matches the
+    script's value for value on the same version; the columns now carry their
+    types even when a table is empty, where pandas wrote untyped `object`
+    columns. Categories are numbered by name through one function that COCO
+    and the `__meta__.md` share. An unknown `-f` used to fall through to zip
+    silently; it is now an error.
+
+12. **The CLI spoke only Chinese.**
+    Every prompt, message, table header and help text of `cxr` and
+    `cxr explore` is English now, including the errors raised further down —
+    the `SpecError`s of the spec, ops, engine and session — that reach the
+    terminal. Comments and docstrings no user sees were left as they were.
+
+13. **`__meta__.md` was written by local scripts and never reached MinIO.**
+    `generate_images_meta.py` and `generate_annotations_meta.py` read a local
+    folder and wrote a file beside it. The templates now live in
+    `core/meta.py` and fill themselves from the database; `cxr meta images`
+    and `cxr meta annotations <set>@<version>` ask only what a person knows
+    and store the file beside the batch in the original-sets bucket. The image
+    data type, which the database does not hold, comes from each PNG's
+    25-byte header instead of downloading the film. Committing a manual-set
+    version — `commit` in `cxr explore`, or `cxr build` — asks the same way
+    after the selection is written and before the transaction commits, so the
+    statistics are final and a failed build asks nothing; the file lands
+    beside `spec.yaml`, and `cxr rm` removes it with the spec. With no terminal
+    the free-text answers are N/A and the statistics are still written;
+    `cxr meta manual-set name@V1 --yes` fills them in later, `--view` shows it.
+    The class distribution uses `cxr show`'s definitions (POS is `score > 0`),
+    where the two scripts had disagreed with each other.

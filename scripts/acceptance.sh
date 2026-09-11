@@ -9,9 +9,8 @@ cd "$(dirname "$0")/.."
 
 CXR=.venv/bin/cxr
 PY=.venv/bin/python
-export PATH="/usr/local/opt/postgresql@16/bin:/opt/homebrew/opt/postgresql@16/bin:$PATH"
-export LC_ALL=C
-PSQL="psql -h localhost -p 5433 -U postgres -d cxr -tA"
+# psql 用 docker compose 裡那個 container 的，主機不需要另外裝 client
+PSQL="docker exec -i local-postgres psql -U postgres -d cxr -tA"
 AUTHOR="--author-name acceptance --author-email acceptance@example.com"
 
 pass=0; fail=0
@@ -72,7 +71,7 @@ SELECT (SELECT count(*) FROM (SELECT * FROM a EXCEPT SELECT * FROM b) x) + (SELE
 check "重跑後影像集合的差異數" "0" "$DIFF"
 
 step "6. 獨立 SQL 檢查（繞過應用程式碼，從資料本身重算一遍）"
-psql -h localhost -p 5433 -U postgres -d cxr -f scripts/verify.sql > /tmp/acc-verify.log 2>&1
+docker exec -i local-postgres psql -U postgres -d cxr < scripts/verify.sql > /tmp/acc-verify.log 2>&1
 sed 's/^/     /' /tmp/acc-verify.log
 check "verify.sql 全部歸零" "0" "$(grep -c '<<<' /tmp/acc-verify.log || true)"
 
@@ -94,6 +93,10 @@ $CXR export pneumonia_train@V1 -o /tmp/acc-export -f csv > /dev/null 2>&1
 check "manifest.csv 資料列數 = DB 影像數" "394" "$(( $(wc -l < /tmp/acc-export/pneumonia_train_V1_manifest.csv) - 1 ))"
 $CXR export pneumonia_train@V1 -o /tmp/acc-export -f coco > /dev/null 2>&1
 check "COCO images 數" "394" "$($PY -c "import json;print(len(json.load(open('/tmp/acc-export/pneumonia_train_V1_coco.json'))['images']))")"
+$CXR export pneumonia_train@V1 -o /tmp/acc-export -f parquet > /dev/null 2>&1
+PQ=/tmp/acc-export/manual-sets/pneumonia_train/annotations/V1
+check "parquet images 數" "394" "$($PY -c "import pyarrow.parquet as pq;print(pq.read_table('$PQ/images.parquet').num_rows)")"
+check "parquet 帶上 __meta__.md" "yes" "$([ -f $PQ/__meta__.md ] && echo yes || echo no)"
 
 step "9. 每一個 CLI 指令都真的跑得起來"
 # 這一節的存在理由：cxr show 曾經必定 crash，卻因為沒人跑過而活了很久。
@@ -102,7 +105,8 @@ for c in "ls sets" "ls batches" "ls categories" "ls annotators" \
          "show pneumonia_train@V1" "spec pneumonia_train@V1" \
          "diff pneumonia_train@V1 pneumonia_val@V1" \
          "check-leakage pneumonia_train@V1 pneumonia_val@V1" \
-         "validate specs/pneumonia_train.yaml" "image 1"; do
+         "validate specs/pneumonia_train.yaml" "image 1" \
+         "meta manual-set pneumonia_train@V1 --view"; do
   out=$($CXR $c 2>&1)
   if [ $? -eq 0 ] && ! printf '%s' "$out" | grep -q "Traceback"; then
     check "cxr $c" "ok" "ok"
@@ -171,10 +175,12 @@ check "建好之後 spec.yaml 在" "yes" "$(cat /tmp/acc-specrm1)"
 $CXR rm specrm@V1 --yes > /dev/null 2>&1
 $PY -c "from cxr_dataset_manager.storage import get_store; print('yes' if get_store().get_spec('specrm','V1') else 'no')" > /tmp/acc-specrm2 2>&1
 check "刪掉之後 spec.yaml 不在" "no" "$(cat /tmp/acc-specrm2)"
+$PY -c "from cxr_dataset_manager.storage import get_store; print('yes' if get_store().get_meta('manual-set','specrm','V1') else 'no')" > /tmp/acc-specrm3 2>&1
+check "刪掉之後 __meta__.md 也不在" "no" "$(cat /tmp/acc-specrm3)"
 
 step "12. 錯誤路徑要給看得懂的訊息，不能吐 traceback"
 for c in "show no_such@V1" "spec no_such@V1" "export no_such@V1" "rm no_such@V1 --yes" \
-         "image 99999999" \
+         "image 99999999" "meta images no_such@V1" "export no_such@V1 -f parquet" \
          "show missing_at_sign" "validate /tmp/nope.yaml"; do
   out=$($CXR $c 2>&1)
   if [ $? -ne 0 ] && ! printf '%s' "$out" | grep -q "Traceback"; then

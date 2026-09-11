@@ -27,11 +27,9 @@ from __future__ import annotations
 
 import argparse
 import re
-from typing import Optional
-
-from sqlalchemy import select
 
 from _common import console, die, summary_table
+from sqlalchemy import select
 
 from cxr_dataset_manager.db import models as m
 from cxr_dataset_manager.db.engine import new_session
@@ -41,23 +39,30 @@ def _images_of(db, original_set_id: int, version: str) -> dict[str, int]:
     rows = db.execute(
         select(m.Image.file_name, m.Image.id)
         .join(m.ImageBatch, m.ImageBatch.id == m.Image.image_batch_id)
-        .where(m.ImageBatch.original_set_id == original_set_id, m.ImageBatch.version == version)
+        .where(
+            m.ImageBatch.original_set_id == original_set_id,
+            m.ImageBatch.version == version,
+        )
     ).all()
     return {file_name: image_id for file_name, image_id in rows}
 
 
-def _normalize(names: dict[str, int], sub: Optional[tuple[str, str]]) -> dict[str, int]:
+def _normalize(names: dict[str, int], sub: tuple[str, str] | None) -> dict[str, int]:
     if not sub:
         return names
     pattern, replacement = sub
-    return {re.sub(pattern, replacement, name): image_id for name, image_id in names.items()}
+    return {
+        re.sub(pattern, replacement, name): image_id for name, image_id in names.items()
+    }
 
 
 def build_lineage(
-    dataset: str, parent_version: str, child_version: str,
+    dataset: str,
+    parent_version: str,
+    child_version: str,
     dry_run: bool = False,
-    child_sub: Optional[tuple[str, str]] = None,
-    parent_sub: Optional[tuple[str, str]] = None,
+    child_sub: tuple[str, str] | None = None,
+    parent_sub: tuple[str, str] | None = None,
 ) -> dict[str, int]:
     if parent_version == child_version:
         die("parent 與 child 不能是同一個版本")
@@ -98,9 +103,13 @@ def build_lineage(
         if only_parent or only_child:
             # 名稱規則不同時，光看數字不知道該怎麼修，要看到實際例子
             if only_parent:
-                console.print(f"  [dim]只在 parent 的例子：{', '.join(only_parent[:3])}[/]")
+                console.print(
+                    f"  [dim]只在 parent 的例子：{', '.join(only_parent[:3])}[/]"
+                )
             if only_child:
-                console.print(f"  [dim]只在 child 的例子：{', '.join(only_child[:3])}[/]")
+                console.print(
+                    f"  [dim]只在 child 的例子：{', '.join(only_child[:3])}[/]"
+                )
             if not matched:
                 console.print(
                     "  [yellow]⚠[/] 一張都配不上。兩批的檔名規則不同——"
@@ -149,19 +158,37 @@ def build_lineage(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--dataset", required=True, help="original-set 名稱")
-    parser.add_argument("--parent-version", required=True, help="來源的 image batch 版本")
-    parser.add_argument("--child-version", required=True, help="衍生的 image batch 版本")
-    parser.add_argument("--child-sub", nargs=2, metavar=("PATTERN", "REPLACE"), default=None,
-                        help="配對前用正則改寫 child 檔名，例如 --child-sub '_PP_' '_'")
-    parser.add_argument("--parent-sub", nargs=2, metavar=("PATTERN", "REPLACE"), default=None,
-                        help="同上，但改寫 parent 檔名")
+    parser.add_argument(
+        "--parent-version", required=True, help="來源的 image batch 版本"
+    )
+    parser.add_argument(
+        "--child-version", required=True, help="衍生的 image batch 版本"
+    )
+    parser.add_argument(
+        "--child-sub",
+        nargs=2,
+        metavar=("PATTERN", "REPLACE"),
+        default=None,
+        help="配對前用正則改寫 child 檔名，例如 --child-sub '_PP_' '_'",
+    )
+    parser.add_argument(
+        "--parent-sub",
+        nargs=2,
+        metavar=("PATTERN", "REPLACE"),
+        default=None,
+        help="同上，但改寫 parent 檔名",
+    )
     parser.add_argument("--dry-run", action="store_true", help="只顯示配對統計，不寫入")
     args = parser.parse_args()
     build_lineage(
-        args.dataset, args.parent_version, args.child_version, args.dry_run,
+        args.dataset,
+        args.parent_version,
+        args.child_version,
+        args.dry_run,
         tuple(args.child_sub) if args.child_sub else None,
         tuple(args.parent_sub) if args.parent_sub else None,
     )

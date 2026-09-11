@@ -27,14 +27,14 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import blake3
-from sqlalchemy import select, text
-
 from _common import console, die, summary_table
+from sqlalchemy import select, text
 
 from cxr_dataset_manager.db import models as m
 from cxr_dataset_manager.db.engine import new_session
@@ -55,11 +55,14 @@ def _hash_file(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _make_reader(root: Optional[Path]) -> Callable[[str, str, str], str]:
+def _make_reader(root: Path | None) -> Callable[[str, str, str], str]:
     """回傳 (original_set, version, file_name) -> hex digest。"""
     if root is not None:
+
         def read_local(original_set: str, version: str, file_name: str) -> str:
-            path = root / "original-sets" / original_set / "images" / version / file_name
+            path = (
+                root / "original-sets" / original_set / "images" / version / file_name
+            )
             if not path.exists():
                 raise FileNotFoundError(str(path))
             return _hash_file(path)
@@ -81,11 +84,11 @@ def _make_reader(root: Optional[Path]) -> Callable[[str, str, str], str]:
 
 
 def backfill_blake3(
-    root: Optional[Path] = None,
-    limit: Optional[int] = None,
+    root: Path | None = None,
+    limit: int | None = None,
     batch_size: int = 200,
     dry_run: bool = False,
-    failure_log: Optional[Path] = None,
+    failure_log: Path | None = None,
 ) -> dict[str, Any]:
     """回傳 summary dict，可以直接當 Airflow 的 XCom 值。
 
@@ -122,7 +125,10 @@ def backfill_blake3(
         while True:
             rows = db.execute(
                 select(
-                    m.Image.id, m.Image.file_name, m.OriginalSet.name, m.ImageBatch.version
+                    m.Image.id,
+                    m.Image.file_name,
+                    m.OriginalSet.name,
+                    m.ImageBatch.version,
                 )
                 .join(m.ImageBatch, m.ImageBatch.id == m.Image.image_batch_id)
                 .join(m.OriginalSet, m.OriginalSet.id == m.ImageBatch.original_set_id)
@@ -140,7 +146,12 @@ def backfill_blake3(
                 cursor = image_id
                 processed += 1
                 try:
-                    updates.append({"id": image_id, "blake3_hash": read(original_set, version, file_name)})
+                    updates.append(
+                        {
+                            "id": image_id,
+                            "blake3_hash": read(original_set, version, file_name),
+                        }
+                    )
                 except Exception as exc:  # 單張失敗不中斷
                     summary["failed"] += 1
                     failures.append(
@@ -173,29 +184,40 @@ def backfill_blake3(
     if failures and failure_log:
         failure_log.parent.mkdir(parents=True, exist_ok=True)
         with open(failure_log, "a", encoding="utf-8") as fh:
-            for record in failures:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            fh.writelines(
+                json.dumps(record, ensure_ascii=False) + "\n" for record in failures
+            )
 
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()
     return summary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--root", type=Path, default=None,
-                        help="從本機目錄讀影像；不給就從物件儲存讀")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--root", type=Path, default=None, help="從本機目錄讀影像；不給就從物件儲存讀"
+    )
     parser.add_argument("--limit", type=int, default=None, help="這次最多處理幾張")
-    parser.add_argument("--batch-size", type=int, default=200, help="每批處理並 commit 幾張")
+    parser.add_argument(
+        "--batch-size", type=int, default=200, help="每批處理並 commit 幾張"
+    )
     parser.add_argument("--dry-run", action="store_true", help="只回報待處理數量")
-    parser.add_argument("--failure-log", type=Path,
-                        default=Path("logs/blake3_failures.jsonl"),
-                        help="失敗紀錄（JSON Lines）")
+    parser.add_argument(
+        "--failure-log",
+        type=Path,
+        default=Path("logs/blake3_failures.jsonl"),
+        help="失敗紀錄（JSON Lines）",
+    )
     args = parser.parse_args()
 
     summary = backfill_blake3(
-        root=args.root, limit=args.limit, batch_size=args.batch_size,
-        dry_run=args.dry_run, failure_log=args.failure_log,
+        root=args.root,
+        limit=args.limit,
+        batch_size=args.batch_size,
+        dry_run=args.dry_run,
+        failure_log=args.failure_log,
     )
     summary_table(
         "補算結果",

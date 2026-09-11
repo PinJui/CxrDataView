@@ -14,3 +14,7 @@ local file paths, so the selected images have to be pulled out of object storage
 into a local cache first.
 
 Fixed interface issues are recorded in `fixed_issues.md`.
+
+## Annotator contribution check
+
+The CLI can show the contribution of a certain annotator

@@ -74,5 +74,5 @@ def test_arbitrary_code_is_refused(expression):
 
 
 def test_unknown_field_is_refused():
-    with pytest.raises(SpecError, match="未知欄位"):
+    with pytest.raises(SpecError, match="unknown field"):
         pred.compile_predicate("patient_name == 'x'")

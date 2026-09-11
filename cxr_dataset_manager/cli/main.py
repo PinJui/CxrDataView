@@ -1,24 +1,25 @@
-"""cxr —— 終端機介面（Layer 4）。
+"""cxr — the terminal interface (Layer 4).
 
-只是皮：每個命令都是「呼叫 core/session 的函式 + 把結果印漂亮」，
-不含任何業務邏輯（design_doc §1 principle 7）。
+Only a skin: every command calls a core/session function and prints the result
+nicely, with no business logic of its own (design_doc §1 principle 7).
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.json import JSON
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
+from cxr_dataset_manager.cli import meta as meta_prompts
 from cxr_dataset_manager.core import export as export_mod
+from cxr_dataset_manager.core.engine import Author
 from cxr_dataset_manager.core.engine import build as run_build
 from cxr_dataset_manager.core.schema import BuildSpec
 from cxr_dataset_manager.core.types import SpecError
@@ -27,59 +28,73 @@ from cxr_dataset_manager.db.engine import apply_schema, get_engine, new_session
 from cxr_dataset_manager.settings import settings
 
 app = typer.Typer(
-    help="CXR dataset 管理工具：把散落各處的 original-set 組成可重現的 manual-set。",
+    help="A chest X-ray dataset manager to handle original sets, manual sets, and their versions.",
     no_args_is_help=True,
     add_completion=False,
 )
-db_app = typer.Typer(help="資料庫與 mock 資料", no_args_is_help=True)
-ls_app = typer.Typer(help="瀏覽目錄", no_args_is_help=True)
-lists_app = typer.Typer(help="外部檔名清單", no_args_is_help=True)
+db_app = typer.Typer(help="Database initialization and seeding.", no_args_is_help=True)
+ls_app = typer.Typer(help="Browse datasets.", no_args_is_help=True)
+lists_app = typer.Typer(help="External file-name lists.", no_args_is_help=True)
+meta_app = typer.Typer(
+    help="Write the __meta__.md that describes a batch or a manual-set version.",
+    no_args_is_help=True,
+)
 app.add_typer(db_app, name="db")
 app.add_typer(ls_app, name="ls")
 app.add_typer(lists_app, name="lists")
+app.add_typer(meta_app, name="meta")
 
 console = Console()
-# 錯誤走 stderr，跟正常輸出分開——管線接 grep 之類的時候才不會混在一起。
+# Errors go to stderr, apart from normal output, so piping into grep does not mix them.
 err_console = Console(stderr=True)
+
+EXPORT_FORMATS = ("zip", "coco", "csv", "parquet")
 
 
 def _spec_line(summary: dict) -> str:
-    """`cxr show` 面板裡描述 spec 位置與健康狀態的那一行。"""
+    """The line of the `cxr show` panel saying where the spec is and whether it is intact."""
     status = summary["spec_status"]
     if status == "none":
-        return "—（匯入的版本，沒有 spec）"
+        return "— (an imported version, no spec)"
     where = f"[dim]{summary['spec_key']}[/]"
     if status == "ok":
         return f"{where}  sha256 {summary['spec_sha256'][:16]}…"
     if status == "missing":
-        return f"{where}  [red]檔案不見了[/]"
-    return f"{where}  [yellow]內容與指紋不符[/]"
+        return f"{where}  [red]the file is missing[/]"
+    return f"{where}  [yellow]content does not match its fingerprint[/]"
 
 
 def _print_category_distribution(rows: list[dict], total_images: int) -> None:
-    """每個 target category 在這個版本裡的正/負/未知分布。
+    """Positive / negative / unknown per target category in this version.
 
-    cls 三欄數的是影像且互斥，相加必定等於影像總數；det 數的是框，一張片
-    可以有好幾個，所以跟前三欄不同單位，也不該相加。
+    The three cls columns count images and exclude each other, so they always
+    add up to the image count; det counts boxes — a film can have several — so
+    it is a different unit and must not be added to them.
     """
     if not rows:
         return
     console.print(
         _table(
-            f"Category distribution（cls 以影像計，共 {total_images} 張；det 以框計）",
+            f"Category distribution (cls counted in images, {total_images} in all; det in boxes)",
             ["target category", "CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"],
             [
-                [r["target"], r["cls_pos"], r["cls_neg"], r["cls_unknown"], r["det_pos"]]
+                [
+                    r["target"],
+                    r["cls_pos"],
+                    r["cls_neg"],
+                    r["cls_unknown"],
+                    r["det_pos"],
+                ]
                 for r in rows
             ],
         )
     )
-    # score 是 NULL 的 det 框既不算 POS 也不算負例，會整個消失在表格外——
-    # 數量不是零就要講出來，不然使用者看不出少了東西。
+    # A det box with a NULL score is neither POS nor negative and would vanish
+    # from the table — when there are any, say so, or nobody sees what is missing.
     unscored = sum(r["det_no_score"] for r in rows)
     if unscored:
         console.print(
-            f"  [yellow]⚠[/] {unscored} 個 det 框沒有 score，不計入 DET POS"
+            f"  [yellow]⚠[/] {unscored} det boxes have no score and are not counted in DET POS"
         )
 
 
@@ -88,25 +103,27 @@ def _die(message: str) -> None:
     raise typer.Exit(1)
 
 
-def _resolve_author(name: Optional[str], email: Optional[str]) -> "Author":
-    """誰建的這份資料集：指令旗標 → .env → 互動詢問。
+def _resolve_author(name: str | None, email: str | None) -> Author:
+    """Who is building this dataset: command flags → .env → ask.
 
-    非互動情境（腳本、CI）問不到就直接失敗並說明怎麼設，
-    比留下一份不知道誰建的資料集好。
+    When nothing can be asked (a script, CI) fail and say how to set it —
+    better than a dataset nobody knows the builder of.
     """
-    from cxr_dataset_manager.core.engine import Author
 
     name = name or settings.author_name
     email = email or settings.author_email
     if not name or not email:
         if not sys.stdin.isatty():
             _die(
-                "不知道是誰要建這份資料集。用 --author-name / --author-email 指定，"
-                "或在 .env 裡設 CXR_AUTHOR_NAME 與 CXR_AUTHOR_EMAIL。"
+                "Who is building this dataset? Pass --author-name / --author-email, "
+                "or set CXR_AUTHOR_NAME and CXR_AUTHOR_EMAIL in .env."
             )
-        console.print("[dim]這份資料集會記下建立者（設 CXR_AUTHOR_NAME / CXR_AUTHOR_EMAIL 可免問）[/]")
-        name = name or typer.prompt("你的名字")
-        email = email or typer.prompt("你的 email")
+        console.print(
+            "[dim]The dataset records who built it "
+            "(set CXR_AUTHOR_NAME / CXR_AUTHOR_EMAIL to skip this question)[/]"
+        )
+        name = name or typer.prompt("Your name")
+        email = email or typer.prompt("Your email")
     try:
         return Author(name=name, email=email)
     except SpecError as exc:
@@ -114,19 +131,24 @@ def _resolve_author(name: Optional[str], email: Optional[str]) -> "Author":
         raise
 
 
-def _resolve(db, ref: str) -> int:
-    """`name@version` → manual_set_version_id，找不到就結束並說清楚。
-
-    六個查詢指令都要做同一件事，抽出來才不會有的擋有的不擋。
-    """
+def _parse_ref(ref: str) -> tuple[str, str]:
     try:
-        name, version = crud.parse_ref(ref)
+        return crud.parse_ref(ref)
     except SpecError as exc:
         _die(str(exc))
         raise
+
+
+def _resolve(db, ref: str) -> int:
+    """`name@version` → manual_set_version_id, or exit saying what is wrong.
+
+    Every query command does the same thing; one function means none of them
+    forgets the check.
+    """
+    name, version = _parse_ref(ref)
     version_id = crud.resolve_version(db, name, version)
     if version_id is None:
-        _die(f"找不到 {ref}（用 [cyan]cxr ls manual-sets[/] 看有哪些）")
+        _die(f"{ref} not found ([cyan]cxr ls manual-sets[/] lists what exists)")
     return version_id
 
 
@@ -145,17 +167,23 @@ def _table(title: str, columns: list[str], rows: list[list]) -> Table:
 
 
 @db_app.command("init")
-def db_init(drop: bool = typer.Option(False, "--drop", help="先清空 public schema 再建")):
-    """套用 db/*.sql 建立 schema。"""
+def db_init(
+    drop: bool = typer.Option(
+        False, "--drop", help="Empty the public schema first, then create it"
+    ),
+):
+    """Apply db/*.sql to create the schema."""
     apply_schema(get_engine(), drop_first=drop)
-    console.print(f"[green]✓[/] schema 已套用到 {settings.database_url}")
+    console.print(f"[green]✓[/] schema applied to {settings.database_url}")
 
 
 @db_app.command("seed")
 def db_seed(
-    with_images: bool = typer.Option(True, help="同時把合成影像上傳到 MinIO"),
+    with_images: bool = typer.Option(
+        True, help="Also upload the synthetic images to MinIO"
+    ),
 ):
-    """產生 mock 資料（刻意帶重複、衝突、命名不一致）。"""
+    """Generate mock data (with deliberate duplicates, conflicts and inconsistent names)."""
     from cxr_dataset_manager.seed import seed_demo
     from cxr_dataset_manager.storage import get_store
 
@@ -163,19 +191,26 @@ def db_seed(
     if with_images:
         store = get_store()
         if not store.alive():
-            _die(f"連不上物件儲存 {settings.s3_endpoint_url}（用 --no-with-images 可只灌 metadata）")
+            _die(
+                f"cannot reach object storage at {settings.s3_endpoint_url} "
+                "(--no-with-images seeds the metadata only)"
+            )
         store.ensure_buckets()
 
     counts = seed_demo(new_session(), store)
-    console.print(_table("Mock 資料", ["表", "筆數"], [[k, v] for k, v in counts.items()]))
+    console.print(
+        _table("Mock data", ["table", "rows"], [[k, v] for k, v in counts.items()])
+    )
 
 
 @db_app.command("reset")
 def db_reset(
-    yes: bool = typer.Option(False, "--yes", "-y", help="不要問，直接做"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask, just do it"),
 ):
-    """清空並重建 schema，然後重灌 mock 資料。"""
-    if not yes and not typer.confirm(f"這會清空 {settings.database_url} 的所有資料，確定嗎？"):
+    """Drop and recreate the schema, then seed the mock data again."""
+    if not yes and not typer.confirm(
+        f"This erases every row in {settings.database_url}. Continue?"
+    ):
         raise typer.Abort()
     apply_schema(get_engine(), drop_first=True)
     db_seed(with_images=True)
@@ -183,7 +218,7 @@ def db_reset(
 
 @db_app.command("status")
 def db_status():
-    """檢查 Postgres / MinIO 通不通，順便印目前的資料量。"""
+    """Check that Postgres / MinIO respond, and print how much data there is."""
     from cxr_dataset_manager.storage import get_store
 
     rows = []
@@ -191,15 +226,25 @@ def db_status():
         db = new_session()
         sets = crud.list_original_sets(db)
         rows.append(["postgres", settings.database_url, "[green]ok[/]"])
-        rows.append(["  original-sets", str(len(sets)), str(sum(s["images"] for s in sets)) + " images"])
+        rows.append(
+            [
+                "  original-sets",
+                str(len(sets)),
+                str(sum(s["images"] for s in sets)) + " images",
+            ]
+        )
         rows.append(["  manual-sets", str(len(crud.list_manual_sets(db))), ""])
     except Exception as exc:
         rows.append(["postgres", settings.database_url, f"[red]{exc}[/]"])
     store = get_store()
     rows.append(
-        ["minio", settings.s3_endpoint_url or "-", "[green]ok[/]" if store.alive() else "[red]連不上[/]"]
+        [
+            "minio",
+            settings.s3_endpoint_url or "-",
+            "[green]ok[/]" if store.alive() else "[red]unreachable[/]",
+        ]
     )
-    console.print(_table("服務狀態", ["元件", "位置", "狀態"], rows))
+    console.print(_table("Services", ["component", "location", "status"], rows))
 
 
 # ---------------------------------------------------------------------------
@@ -209,29 +254,36 @@ def db_status():
 
 @ls_app.command("sets")
 def ls_sets():
-    """列出所有 original-set。"""
+    """List every original-set."""
     rows = crud.list_original_sets(new_session())
     console.print(
         _table(
             "Original sets",
-            ["名稱", "影像批次", "標註批次", "影像數"],
-            [[r["name"], r["image_batches"], r["annotation_batches"], r["images"]] for r in rows],
+            ["name", "image batches", "annotation batches", "images"],
+            [
+                [r["name"], r["image_batches"], r["annotation_batches"], r["images"]]
+                for r in rows
+            ],
         )
     )
 
 
 @ls_app.command("batches")
-def ls_batches(original_set: Optional[str] = typer.Argument(None)):
-    """列出 image/annotation batch（spec 的 source 就是用這裡的 名稱@版本）。"""
+def ls_batches(original_set: str | None = typer.Argument(None)):
+    """List image/annotation batches (a spec's source names them as name@version)."""
     rows = crud.list_batches(new_session(), original_set)
     console.print(
         _table(
             "Batches",
-            ["original_set", "種類", "版本", "spec 寫法", "數量", "類別數"],
+            ["original_set", "kind", "version", "in a spec", "items", "categories"],
             [
                 [
-                    r["original_set_name"], r["batch_kind"], r["version"],
-                    f"{r['original_set_name']}@{r['version']}", r["item_count"], r["categories"] or "",
+                    r["original_set_name"],
+                    r["batch_kind"],
+                    r["version"],
+                    f"{r['original_set_name']}@{r['version']}",
+                    r["item_count"],
+                    r["categories"] or "",
                 ]
                 for r in rows
             ],
@@ -241,14 +293,19 @@ def ls_batches(original_set: Optional[str] = typer.Argument(None)):
 
 @ls_app.command("categories")
 def ls_categories():
-    """列出每個 annotation_batch 的 local category 命名空間。"""
+    """List each annotation batch's local category namespace."""
     rows = crud.list_categories(new_session())
     console.print(
         _table(
             "Local categories",
-            ["scope", "名稱", "supercategory", "id"],
+            ["scope", "name", "supercategory", "id"],
             [
-                [f"{r['original_set']}@{r['version']}", r["name"], r["supercategory"], r["id"]]
+                [
+                    f"{r['original_set']}@{r['version']}",
+                    r["name"],
+                    r["supercategory"],
+                    r["id"],
+                ]
                 for r in rows
             ],
         )
@@ -257,49 +314,63 @@ def ls_categories():
 
 @ls_app.command("annotators")
 def ls_annotators():
-    """列出標註者與各自的標註量。"""
+    """List annotators and how much each of them labelled."""
     rows = crud.list_annotators(new_session())
     console.print(
-        _table("Annotators", ["名稱", "cls", "det"], [[r["name"], r["cls"], r["det"]] for r in rows])
+        _table(
+            "Annotators",
+            ["name", "cls", "det"],
+            [[r["name"], r["cls"], r["det"]] for r in rows],
+        )
     )
 
 
 @ls_app.command("manual-sets")
 def ls_manual_sets():
-    """列出所有 manual-set 及其版本。"""
+    """List every manual-set and its versions."""
     rows = crud.list_manual_sets(new_session())
     table_rows = []
     for entry in rows:
         for v in entry["versions"] or [{}]:
             table_rows.append(
                 [
-                    entry["name"], v.get("version", "—"), v.get("images", ""),
-                    v.get("cls", ""), v.get("det", ""), v.get("targets", ""),
+                    entry["name"],
+                    v.get("version", "—"),
+                    v.get("images", ""),
+                    v.get("cls", ""),
+                    v.get("det", ""),
+                    v.get("targets", ""),
                     str(v.get("created_at", ""))[:19],
                 ]
             )
     console.print(
         _table(
-            "Manual sets", ["名稱", "版本", "影像", "cls", "det", "target 類別", "建立時間"], table_rows
+            "Manual sets",
+            ["name", "version", "images", "cls", "det", "target categories", "created"],
+            table_rows,
         )
     )
 
 
 @ls_app.command("history")
 def ls_history(limit: int = 20):
-    """列出建構歷史：每個版本 + 產生它的 spec。
+    """List the build history: every version and the spec that made it.
 
-    探索過程不落庫，所以這裡看到的就是全部——一個版本一份 spec。
+    Exploration never reaches the database, so this is everything — one spec
+    per version.
     """
     rows = crud.build_history(new_session(), limit)
     console.print(
         _table(
-            "建構歷史",
-            ["manual-set", "版本", "影像", "spec", "建立者", "建立時間"],
+            "Build history",
+            ["manual-set", "version", "images", "spec", "built by", "created"],
             [
                 [
-                    r["manual_set"], r["version"], r["images"],
-                    (r["spec_sha256"] or "—")[:12], r["created_by_name"],
+                    r["manual_set"],
+                    r["version"],
+                    r["images"],
+                    (r["spec_sha256"] or "—")[:12],
+                    r["created_by_name"],
                     str(r["created_at"])[:19],
                 ]
                 for r in rows
@@ -307,34 +378,35 @@ def ls_history(limit: int = 20):
         )
     )
 
+
 # ---------------------------------------------------------------------------
-# 外部檔名清單
+# external file-name lists
 # ---------------------------------------------------------------------------
 
 
 @lists_app.command("add")
 def lists_add(
-    file: Path = typer.Argument(..., help="一行一個檔名的文字檔"),
-    note: Optional[str] = typer.Option(None, "--note", "-n", help="給人看的說明"),
+    file: Path = typer.Argument(..., help="A text file with one file name per line"),
+    note: str | None = typer.Option(
+        None, "--note", "-n", help="A description for humans"
+    ),
 ):
-    """把檔名清單存進資料庫，回傳它的 sha256。
+    """Store a file-name list in the database and print its sha256.
 
-    spec 裡用 file_names_ref 引用這個 sha256，就不必把上萬個檔名內嵌進去。
-    內容定址：同一份清單存幾次都只有一列。
+    A spec refers to it with file_names_ref instead of inlining ten thousand
+    names. Content-addressed: storing the same list twice keeps one row.
     """
     if not file.exists():
-        _die(f"找不到 {file}")
+        _die(f"{file} not found")
     names = file.read_text().splitlines()
-    digest, created = crud.register_import_list(
-        new_session(), names, note or file.name
-    )
+    digest, created = crud.register_import_list(new_session(), names, note or file.name)
     count = len(crud.normalize_file_names(names))
     console.print(
-        f"[green]✓[/] {'已存入' if created else '已存在（內容相同）'} "
-        f"{count:,} 筆\n  sha256 [bold]{digest}[/]"
+        f"[green]✓[/] {'stored' if created else 'already stored (same content)'} "
+        f"{count:,} names\n  sha256 [bold]{digest}[/]"
     )
     console.print(
-        "\n  spec 裡這樣引用：\n"
+        "\n  refer to it in a spec like this:\n"
         f"[dim]    file_names_ref:\n"
         f"      sha256: {digest}\n"
         f"      source: {note or file.name}[/]"
@@ -343,15 +415,19 @@ def lists_add(
 
 @lists_app.command("ls")
 def lists_ls(limit: int = 30):
-    """列出已存入的清單。"""
+    """List the stored lists."""
     rows = crud.list_import_lists(new_session(), limit)
     console.print(
         _table(
-            "檔名清單",
-            ["sha256", "筆數", "說明", "建立時間"],
+            "File-name lists",
+            ["sha256", "names", "note", "created"],
             [
-                [r["sha256"][:16] + "…", f"{r['n']:,}", r["source_note"] or "",
-                 str(r["created_at"])[:19]]
+                [
+                    r["sha256"][:16] + "…",
+                    f"{r['n']:,}",
+                    r["source_note"] or "",
+                    str(r["created_at"])[:19],
+                ]
                 for r in rows
             ],
         )
@@ -360,34 +436,42 @@ def lists_ls(limit: int = 30):
 
 @lists_app.command("show")
 def lists_show(
-    sha256: str = typer.Argument(..., help="完整或前綴皆可"),
-    limit: int = typer.Option(20, "--limit", "-n", help="最多印幾筆，0 表示全部"),
+    sha256: str = typer.Argument(..., help="The full hash or a prefix of it"),
+    limit: int = typer.Option(
+        20, "--limit", "-n", help="How many names to print; 0 prints all"
+    ),
 ):
-    """印出某份清單的內容。"""
+    """Print the contents of a list."""
     db = new_session()
     names = crud.get_import_list(db, sha256)
     if names is None:
-        matches = [r for r in crud.list_import_lists(db, 500)
-                   if r["sha256"].startswith(sha256)]
+        matches = [
+            r for r in crud.list_import_lists(db, 500) if r["sha256"].startswith(sha256)
+        ]
         if len(matches) != 1:
-            _die(f"找不到 sha256 開頭為 {sha256} 的清單"
-                 if not matches else f"{sha256} 對到 {len(matches)} 份清單，請給更長的前綴")
+            _die(
+                f"no list whose sha256 starts with {sha256}"
+                if not matches
+                else f"{sha256} matches {len(matches)} lists; give a longer prefix"
+            )
         names = crud.get_import_list(db, matches[0]["sha256"])
     assert names is not None
     shown = names if limit == 0 else names[:limit]
     for name in shown:
         console.print(f"  {name}")
     if len(shown) < len(names):
-        console.print(f"  [dim]… 還有 {len(names) - len(shown):,} 筆（-n 0 印全部）[/]")
+        console.print(
+            f"  [dim]… {len(names) - len(shown):,} more (-n 0 prints all)[/]"
+        )
 
 
 # ---------------------------------------------------------------------------
-# spec 的驗證與執行
+# validating and running a spec
 # ---------------------------------------------------------------------------
 
 
 def _spec_argument(db, token: str) -> BuildSpec:
-    """指令列上的 spec 參數：本機檔案或 manual-set@版本。"""
+    """A spec argument on the command line: a local file or manual-set@version."""
     try:
         return crud.load_spec_from(
             db, token, on_warning=lambda msg: console.print(f"[yellow]⚠[/] {msg}")
@@ -399,25 +483,30 @@ def _spec_argument(db, token: str) -> BuildSpec:
 
 def _load_spec(path: Path) -> BuildSpec:
     if not path.exists():
-        _die(f"找不到 spec 檔 {path}")
+        _die(f"spec file {path} not found")
     try:
         return BuildSpec.from_yaml(path.read_text())
     except Exception as exc:
-        _die(f"spec 格式錯誤：\n{exc}")
+        _die(f"invalid spec:\n{exc}")
         raise
 
 
 @app.command()
-def validate(spec_file: Path = typer.Argument(..., help="spec YAML 檔")):
-    """只檢查 spec 語法與 step 依賴，不碰資料庫。"""
+def validate(spec_file: Path = typer.Argument(..., help="A spec YAML file")):
+    """Only checks syntax of spec and dependency of step. (Will not touch database)"""
     spec = _load_spec(spec_file)
-    console.print(f"[green]✓[/] spec 合法，{len(spec.steps)} 個 step，final = [bold]{spec.final}[/]")
+    console.print(
+        f"[green]✓[/] valid spec, {len(spec.steps)} steps, final = [bold]{spec.final}[/]"
+    )
     console.print(f"  sha256 = {spec.sha256()}")
     console.print(
         _table(
             "Steps",
             ["#", "step_id", "op", "inputs"],
-            [[i, s.id, s.op, ", ".join(s.input_ids()) or "—"] for i, s in enumerate(spec.steps)],
+            [
+                [i, s.id, s.op, ", ".join(s.input_ids()) or "—"]
+                for i, s in enumerate(spec.steps)
+            ],
         )
     )
 
@@ -425,34 +514,60 @@ def validate(spec_file: Path = typer.Argument(..., help="spec YAML 檔")):
 @app.command()
 def build(
     spec_file: str = typer.Argument(
-        ..., help="spec YAML 檔，或 manual-set@版本（沿用該版本當初的 spec）"
+        ...,
+        help="A spec YAML file, or manual-set@version (reuse the spec of that version)",
     ),
-    manual_set: str = typer.Option(..., "--manual-set", "-m", help="要寫入的 manual-set 名稱"),
+    manual_set: str = typer.Option(
+        ..., "--manual-set", "-m", help="The manual-set to write into"
+    ),
     version: str = typer.Option("V1", "--version", "-v"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="跑完但不落庫，只看結果"),
-    author_name: Optional[str] = typer.Option(None, "--author-name", help="建立者姓名"),
-    author_email: Optional[str] = typer.Option(None, "--author-email", help="建立者 email"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Run everything but write nothing; just show the result"
+    ),
+    author_name: str | None = typer.Option(
+        None, "--author-name", help="Name of the builder"
+    ),
+    author_email: str | None = typer.Option(
+        None, "--author-email", help="Email of the builder"
+    ),
 ):
-    """執行一份 spec，產出 manual-set 版本。
+    """Run a spec, generate a manual-set version in the database.
 
-    spec 可以是本機檔案，也可以是 `manual-set@版本`——後者直接沿用那個版本
-    當初的配方，用來「照 V1 的做法再做一版」。
+    The spec can be a local file or `manual-set@version` — the latter reuses the
+    recipe of that version, to "make another one the way V1 was made". A real
+    build asks for the version's __meta__.md once the result is known (with no
+    terminal it writes the statistics and leaves the rest N/A).
     """
     db = new_session()
     spec = _spec_argument(db, spec_file)
     author = None if dry_run else _resolve_author(author_name, author_email)
     try:
-        result = run_build(db, spec, manual_set, version, dry_run=dry_run, author=author)
+        result = run_build(
+            db,
+            spec,
+            manual_set,
+            version,
+            dry_run=dry_run,
+            author=author,
+            meta=None if dry_run else meta_prompts.on_commit(db),
+        )
     except SpecError as exc:
         _die(str(exc))
         raise
 
     console.print(
         _table(
-            "執行過程",
-            ["#", "step_id", "op", "影像", "cls", "det"],
+            "Execution",
+            ["#", "step_id", "op", "images", "cls", "det"],
             [
-                [r.step_index, r.step_id, r.op, r.counts["images"], r.counts["cls"], r.counts["det"]]
+                [
+                    r.step_index,
+                    r.step_id,
+                    r.op,
+                    r.counts["images"],
+                    r.counts["cls"],
+                    r.counts["det"],
+                ]
                 for r in result.execution.reports
             ],
         )
@@ -463,49 +578,56 @@ def build(
     if dry_run:
         console.print(
             Panel(
-                f"影像 [bold]{result.counts['images']}[/]  "
+                f"images [bold]{result.counts['images']}[/]  "
                 f"cls [bold]{result.counts['cls']}[/]  det [bold]{result.counts['det']}[/]\n"
                 f"spec sha256 {spec.sha256()[:16]}…",
-                title="[yellow]試跑完成[/]（資料庫沒有任何寫入）",
+                title="[yellow]Dry run finished[/] (nothing was written)",
             )
         )
         return
     console.print(
         Panel(
-            f"影像 [bold]{result.counts['images']}[/]  "
+            f"images [bold]{result.counts['images']}[/]  "
             f"cls [bold]{result.counts['cls']}[/]  det [bold]{result.counts['det']}[/]\n"
-            f"target category: {', '.join(result.target_categories) or '—'}\n"
-            f"spec sha256 {spec.sha256()[:16]}…",
+            f"target categories: {', '.join(result.target_categories) or '—'}\n"
+            f"spec sha256 {spec.sha256()[:16]}…\n"
+            f"__meta__.md → [dim]{result.meta_location}[/]",
             title=f"[green]✓[/] {manual_set}@{version}",
         )
     )
 
 
 @app.command()
-def show(ref: str = typer.Argument(..., help="manual-set@版本，例如 pneumonia_v4@V1")):
-    """看一個 manual-set 版本的組成。"""
+def show(
+    ref: str = typer.Argument(..., help="manual-set@version, e.g. pneumonia_v4@V1"),
+):
+    """Show the composition of a manual-set version."""
     db = new_session()
     version_id = _resolve(db, ref)
     summary = crud.version_summary(db, version_id)
 
     console.print(
         Panel(
-            f"影像 [bold]{summary['images']}[/]  cls [bold]{summary['cls']}[/]  "
+            f"Images [bold]{summary['images']}[/]  cls [bold]{summary['cls']}[/]  "
             f"det [bold]{summary['det']}[/]\n"
-            f"病患數 {summary['subjects']['distinct']}"
-            f"（{summary['subjects']['images_without_subject']} 張無病患資訊）\n"
-            f"建立者 {summary['created_by']}\n"
+            f"Subjects {summary['subjects']['distinct']}"
+            f" ({summary['subjects']['images_without_subject']} images without subject information)\n"
+            f"Built by {summary['created_by']}\n"
             f"spec {_spec_line(summary)}",
             title=f"[cyan]{ref}[/]",
         )
     )
     console.print(
-        _table("來源組成", ["來源", "影像數"], [[k, v] for k, v in summary["by_source"].items()])
+        _table(
+            "Composition",
+            ["source", "images"],
+            [[k, v] for k, v in summary["by_source"].items()],
+        )
     )
     console.print(
         _table(
-            "Target category",
-            ["target", "標註數", "來自哪些 local category"],
+            "Target categories",
+            ["target", "annotations", "from local categories"],
             [
                 [k, v, ", ".join(summary["category_mappings"].get(k, []))]
                 for k, v in summary["by_target_category"].items()
@@ -517,54 +639,65 @@ def show(ref: str = typer.Argument(..., help="manual-set@版本，例如 pneumon
 
 @app.command()
 def spec(
-    ref: str = typer.Argument(..., help="manual-set@版本"),
-    out: Optional[Path] = typer.Option(
-        None, "--out", "-o", help="存成 YAML 檔（不加就只是顯示）"
+    ref: str = typer.Argument(..., help="manual-set@version"),
+    out: Path | None = typer.Option(
+        None, "--out", "-o", help="Save it as a YAML file (without this it is only shown)"
     ),
 ):
-    """檢視某個版本的 spec，或把它存成檔案。
+    """Show the spec of a certain version, or save it to a YAML file.
 
-    spec 只有三個動作：save（存成 YAML）、view（看）、load（`cxr build` 或
-    REPL 的 load）。存檔一定要用 -o——它直接寫檔案，不經過終端機。
+    A spec has three operations: save (a YAML file), view, and load (`cxr build`
+    or `load` in the REPL). Saving always uses -o, which writes the file
+    directly without going through the terminal.
 
-    終端機是給人看的：`cxr spec x@V1` 的輸出經過排版與上色，把它重導向到檔案
-    不會得到一份可用的 spec，那是顯示通道不是資料通道。
+    The terminal is for people: `cxr spec x@V1` is laid out and coloured, and
+    redirecting it into a file does not give a usable spec — it is a display
+    channel, not a data channel.
     """
     db = new_session()
     version_id = _resolve(db, ref)
     loaded = crud.load_spec(db, version_id)
     if loaded["yaml"] is None:
-        _die(f"{ref}：{crud._spec_unavailable(loaded)}")
+        _die(f"{ref}: {crud._spec_unavailable(loaded)}")
     if loaded["status"] == "modified":
         console.print(f"[yellow]⚠[/] {crud._spec_unavailable(loaded)}")
 
     if out is not None:
-        # 直接寫檔，不碰 console——存下來的必須跟物件儲存上那份逐位元組相同
+        # Written straight to the file, never through the console: what is saved
+        # must be byte-identical to the copy in object storage.
         out.expanduser().write_text(loaded["yaml"])
-        console.print(f"[green]✓[/] 已存到 [bold]{out}[/]", soft_wrap=True)
+        console.print(f"[green]✓[/] saved to [bold]{out}[/]", soft_wrap=True)
         return
-    # word_wrap=True：太長的行折行而不是裁掉，畫面上永遠不會少字
+    # word_wrap=True: long lines wrap instead of being cropped, so no text is lost
     console.print(Syntax(loaded["yaml"], "yaml", theme="ansi_dark", word_wrap=True))
 
 
 @app.command()
 def image(
-    ref: str = typer.Argument(..., help="image_id，或 original_set/版本/檔名"),
-    version: Optional[str] = typer.Option(
-        None, "--version", "-v", help="只看某個 manual-set 版本選了哪些標註"
+    ref: str = typer.Argument(..., help="An image_id, or original_set/version/file_name"),
+    version: str | None = typer.Option(
+        None,
+        "--version",
+        "-v",
+        help="Only show the annotations a manual-set version selected",
     ),
 ):
-    """看一張影像：標註、血緣、內容重複、被哪些資料集用了。
+    """Show a image's annotation, lineage, content hash, referenced by which manual-sets.
 
-    id 從 `cxr explore` 的 images / duplicates / conflicts 輸出取得，
-    也可以直接給 original_set/版本/檔名。
+    Ids come from the images / duplicates / conflicts output of `cxr explore`;
+    original_set/version/file_name works too.
     """
     db = new_session()
     image_id = crud.resolve_image(db, ref)
     if image_id is None:
         _die(
-            f"找不到影像 {ref}"
-            + ("（檔名可能對到多張，請給完整路徑或 image_id）" if not ref.isdigit() else "")
+            f"image {ref} not found"
+            + (
+                " (a bare file name may match several images; "
+                "give the full path or the image_id)"
+                if not ref.isdigit()
+                else ""
+            )
         )
 
     version_id = _resolve(db, version) if version else None
@@ -573,8 +706,9 @@ def image(
     console.print(
         Panel(
             f"[bold]{d['original_set']}/{d['batch_version']}/{d['file_name']}[/]\n"
-            f"{d['width']} × {d['height']}　病患 {d['subject_id'] or '未知'}　"
-            f"拍攝 {d['date_captured'] or '未知'}　授權 {d['license'] or '未知'}\n"
+            f"{d['width']} × {d['height']}   subject {d['subject_id'] or 'unknown'}   "
+            f"captured {d['date_captured'] or 'unknown'}   "
+            f"license {d['license'] or 'unknown'}\n"
             f"blake3 {d['blake3_hash'] or '—'}",
             title=f"[cyan]image #{image_id}[/]",
         )
@@ -589,22 +723,22 @@ def image(
     ]
     console.print(
         _table(
-            "標註" + (f"（限 {version}）" if version else ""),
-            ["id", "種類", "類別", "來源", "標註者", "score"],
+            "Annotations" + (f" (only {version})" if version else ""),
+            ["id", "kind", "category", "source", "annotator", "score"],
             rows,
         )
         if rows
-        else _table("標註", ["id"], [])
+        else _table("Annotations", ["id"], [])
     )
 
     if d["lineage"]:
         console.print(
             _table(
-                "血緣",
-                ["方向", "影像", "id"],
+                "Lineage",
+                ["direction", "image", "id"],
                 [
                     [
-                        "◀ 來自" if l["direction"] == "parent" else "▶ 衍生出",
+                        "◀ from" if l["direction"] == "parent" else "▶ derived into",
                         f"{l['original_set']}/{l['version']}/{l['file_name']}",
                         f"#{l['id']}",
                     ]
@@ -616,10 +750,13 @@ def image(
     if d["duplicates"]:
         console.print(
             _table(
-                "內容完全相同的其他影像（blake3 相同）",
-                ["影像", "id"],
+                "Other images with identical content (same blake3)",
+                ["image", "id"],
                 [
-                    [f"{x['original_set']}/{x['batch_version']}/{x['file_name']}", f"#{x['id']}"]
+                    [
+                        f"{x['original_set']}/{x['batch_version']}/{x['file_name']}",
+                        f"#{x['id']}",
+                    ]
                     for x in d["duplicates"]
                 ],
             )
@@ -628,23 +765,26 @@ def image(
     if d["used_by"]:
         console.print(
             _table(
-                "被這些資料集用了",
-                ["manual-set", "版本", "選中的標註數"],
+                "Used by these datasets",
+                ["manual-set", "version", "annotations selected"],
                 [[u["name"], u["version"], u["annotations"]] for u in d["used_by"]],
             )
         )
         console.print(
-            f"  [dim]cxr why <manual-set@版本> --image "
-            f"{d['original_set']}/{d['batch_version']}/{d['file_name']} 看它是怎麼進去的[/]"
+            f"  [dim]cxr why <manual-set@version> --image "
+            f"{d['original_set']}/{d['batch_version']}/{d['file_name']} "
+            "shows how it got in[/]"
         )
 
 
 @app.command()
 def why(
-    ref: str = typer.Argument(..., help="manual-set@版本"),
-    image: str = typer.Option(..., "--image", "-i", help="檔名，或 original_set/版本/檔名"),
+    ref: str = typer.Argument(..., help="manual-set@version"),
+    image: str = typer.Option(
+        ..., "--image", "-i", help="A file name, or original_set/version/file_name"
+    ),
 ):
-    """回答「這張圖是在哪一步、依據什麼規則被選中或排除的」。"""
+    """Answer the question that "At which step, or by which criteria was this image selected or excluded?"""
     db = new_session()
     version_id = _resolve(db, ref)
 
@@ -652,19 +792,29 @@ def why(
     if not result["found"]:
         _die(result["reason"])
 
-    status = "[green]在最終集合裡[/]" if result["in_final_set"] else "[red]不在最終集合裡[/]"
+    status = (
+        "[green]in the final set[/]"
+        if result["in_final_set"]
+        else "[red]not in the final set[/]"
+    )
     console.print(Panel(f"{image}\n{status}", title=f"cxr why · {ref}"))
 
     if not result["trail"]:
-        console.print("[yellow]這次 build 沒有任何一步提到這張影像——它從未進入候選集合。[/]")
+        console.print(
+            "[yellow]No step of this build mentions the image — "
+            "it never entered the candidate set.[/]"
+        )
         return
 
     colours = {
-        "added": "green", "dropped": "red", "remapped": "yellow",
-        "overridden": "magenta", "missing": "red",
+        "added": "green",
+        "dropped": "red",
+        "remapped": "yellow",
+        "overridden": "magenta",
+        "missing": "red",
     }
     for entry in result["trail"]:
-        kind = entry["entity_kind"].replace("_annotation", " 標註").replace("image", "影像")
+        kind = entry["entity_kind"].replace("_annotation", " annotation")
         colour = colours.get(entry["decision"], "white")
         console.print(
             f"  [dim]step {entry['step_index']}[/] [bold]{entry['step_id']}[/] "
@@ -677,10 +827,10 @@ def why(
 
 @app.command()
 def diff(
-    left: str = typer.Argument(..., help="manual-set@版本"),
-    right: str = typer.Argument(..., help="manual-set@版本"),
+    left: str = typer.Argument(..., help="manual-set@version"),
+    right: str = typer.Argument(..., help="manual-set@version"),
 ):
-    """比較兩個 manual-set 版本。"""
+    """Compare two manual-set versions."""
     db = new_session()
     ids = []
     for ref in (left, right):
@@ -689,32 +839,35 @@ def diff(
     result = crud.diff_versions(db, ids[0], ids[1])
     console.print(
         _table(
-            "影像",
-            ["", "數量"],
+            "Images",
+            ["", "count"],
             [
-                [f"{left} 有", result["left"]["images"]],
-                [f"{right} 有", result["right"]["images"]],
-                ["新增", f"[green]+{result['images']['added']}[/]"],
-                ["移除", f"[red]-{result['images']['removed']}[/]"],
-                ["兩邊都有", result["images"]["unchanged"]],
+                [f"in {left}", result["left"]["images"]],
+                [f"in {right}", result["right"]["images"]],
+                ["added", f"[green]+{result['images']['added']}[/]"],
+                ["removed", f"[red]-{result['images']['removed']}[/]"],
+                ["in both", result["images"]["unchanged"]],
             ],
         )
     )
     console.print(
         _table(
-            "cls 標註",
-            ["", "數量"],
+            "cls annotations",
+            ["", "count"],
             [
-                ["新增", f"[green]+{result['cls_annotations']['added']}[/]"],
-                ["移除", f"[red]-{result['cls_annotations']['removed']}[/]"],
-                ["標註有變動的影像", result["cls_annotations"]["images_with_changed_annotations"]],
+                ["added", f"[green]+{result['cls_annotations']['added']}[/]"],
+                ["removed", f"[red]-{result['cls_annotations']['removed']}[/]"],
+                [
+                    "images whose annotations changed",
+                    result["cls_annotations"]["images_with_changed_annotations"],
+                ],
             ],
         )
     )
     if result["category_mapping_changes"]:
         console.print(
             _table(
-                "Category 映射變動",
+                "Category mapping changes",
                 ["local category", left, right],
                 [
                     [k, v["from"] or "—", v["to"] or "—"]
@@ -723,18 +876,23 @@ def diff(
             )
         )
     if result["images"]["added_sample"]:
-        console.print("[green]新增範例:[/] " + ", ".join(result["images"]["added_sample"][:5]))
+        console.print(
+            "[green]added, e.g.:[/] " + ", ".join(result["images"]["added_sample"][:5])
+        )
     if result["images"]["removed_sample"]:
-        console.print("[red]移除範例:[/] " + ", ".join(result["images"]["removed_sample"][:5]))
+        console.print(
+            "[red]removed, e.g.:[/] "
+            + ", ".join(result["images"]["removed_sample"][:5])
+        )
 
 
 @app.command("check-leakage")
 def check_leakage(
-    refs: list[str] = typer.Argument(..., help="兩個以上的 manual-set@版本"),
+    refs: list[str] = typer.Argument(..., help="Two or more manual-set@version"),
 ):
-    """檢查數個版本之間有沒有內容重複或共用病患（train/val leakage）。"""
+    """Check if there are any duplicate content or shared subjects between multiple versions."""
     if len(refs) < 2:
-        _die("至少要給兩個版本才能比較")
+        _die("give at least two versions to compare")
     db = new_session()
     ids = []
     for ref in refs:
@@ -746,46 +904,63 @@ def check_leakage(
     style = "red" if (content or subjects) else "green"
     console.print(
         Panel(
-            f"完全相同的影像內容（blake3 相同）: [bold]{content}[/] 組\n"
-            f"跨版本共用的病患: [bold]{subjects}[/] 人"
-            f"（涉及 {report['shared_subjects']['images_involved']} 張影像）",
-            title=f"[{style}]Leakage 檢查[/] " + " ↔ ".join(refs),
+            f"Identical image content (same blake3): [bold]{content}[/] groups\n"
+            f"Subjects shared across versions: [bold]{subjects}[/]"
+            f" ({report['shared_subjects']['images_involved']} images involved)",
+            title=f"[{style}]Leakage check[/] " + " ↔ ".join(refs),
         )
     )
     for group in report["identical_content"]["sample"][:5]:
         console.print(f"  · {group['blake3_hash'][:12]}… → {', '.join(group['refs'])}")
     for group in report["shared_subjects"]["sample"][:5]:
-        console.print(f"  · 病患 {group['subject_id']} 出現在版本 {group['versions']}")
+        console.print(
+            f"  · subject {group['subject_id']} appears in versions {group['versions']}"
+        )
 
 
 @app.command()
 def rm(
-    ref: str = typer.Argument(..., help="manual-set@版本，或只給名稱刪掉整個"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="不要問，直接刪"),
+    ref: str = typer.Argument(
+        ..., help="manual-set@version, or only the name to delete all of it"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask, just delete"),
 ):
-    """刪除一個 manual-set 版本，或整個 manual-set。
+    """Delete a manual-set version, or the entire manual-set.
 
-    版本本來是不可變的記錄，這是那條規則的例外——build 打錯想重用版本號、
-    清掉實驗留下的東西之類。原始的影像與標註完全不受影響，manual-set
-    從來就只是「選了哪些」的記錄。
+    Versions are normally immutable records, but this is an exception to that rule—when a build is incorrect and you want to reuse a version number,
+    or to clean up experimental artifacts. The original images and annotations are completely unaffected, as manual-sets are merely records of "which ones were selected".
 
-    物件儲存上那份 spec.yaml 也會一起刪掉，刪完就再也重現不出這份資料集了。
+    Corresponding spec.yaml and __meta__.md files stored in the object storage will also be deleted, and once deleted, the dataset cannot be reproduced.
     """
     db = new_session()
     manual_set, _, version = ref.partition("@")
     plan = crud.describe_deletion(db, manual_set, version or None)
     if not plan["found"]:
-        _die(f"找不到 {ref}（用 [cyan]cxr ls manual-sets[/] 看有哪些）")
+        _die(f"{ref} not found ([cyan]cxr ls manual-sets[/] lists what exists)")
 
     console.print(
         _table(
-            f"即將刪除 [bold]{manual_set}[/]",
-            ["版本", "影像", "cls", "det", "target", "步驟", "建立者", "建立時間"],
+            f"About to delete [bold]{manual_set}[/]",
+            [
+                "version",
+                "images",
+                "cls",
+                "det",
+                "targets",
+                "steps",
+                "built by",
+                "created",
+            ],
             [
                 [
-                    v["version"], v["images"], v["cls"], v["det"], v["targets"],
+                    v["version"],
+                    v["images"],
+                    v["cls"],
+                    v["det"],
+                    v["targets"],
                     v["steps"] if v["steps"] is not None else "—",
-                    v["created_by"], str(v["created_at"])[:19],
+                    v["created_by"],
+                    str(v["created_at"])[:19],
                 ]
                 for v in plan["versions"]
             ],
@@ -794,8 +969,9 @@ def rm(
     with_spec = [v for v in plan["versions"] if v["spec_key"]]
     if with_spec:
         console.print(
-            f"  [yellow]⚠[/] {len(with_spec)} 份 spec.yaml 會從物件儲存一併刪除——"
-            "刪掉之後就再也重現不出這些資料集了。要留存請先執行："
+            f"  [yellow]⚠[/] {len(with_spec)} spec.yaml files will be deleted from "
+            "object storage too — after that these datasets can never be reproduced. "
+            "To keep them, run first:"
         )
         for v in with_spec:
             console.print(
@@ -803,74 +979,248 @@ def rm(
                 f"-o {manual_set}_{v['version']}.yaml[/]"
             )
     if plan["removes_manual_set"]:
-        console.print(f"  [dim]這會刪掉 {manual_set} 的所有版本，連同這個名稱本身[/]")
+        console.print(
+            f"  [dim]this deletes every version of {manual_set}, and the name itself[/]"
+        )
 
     if not yes:
         if not sys.stdin.isatty():
-            _die("非互動模式下不會自動刪除。確定要刪請加 --yes。")
-        if not typer.confirm("確定刪除嗎？"):
-            console.print("  [dim]已取消[/]")
+            _die("Refusing to delete without a terminal to confirm. Add --yes if you mean it.")
+        if not typer.confirm("Delete?"):
+            console.print("  [dim]cancelled[/]")
             raise typer.Abort()
 
-    from cxr_dataset_manager.storage import get_store
+    from cxr_dataset_manager.storage import get_store, meta_location
 
-    # 先刪資料庫。物件先刪的話，資料庫失敗會留下一個指得到卻讀不到 spec 的版本。
+    # The database goes first. Deleting the objects first would, if the database
+    # then failed, leave a version pointing at a spec that cannot be read.
     crud.delete_manual_set(db, manual_set, version or None)
-    for v in with_spec:
+    leftovers = []
+    for v in plan["versions"]:
         try:
-            get_store().delete_spec(manual_set, v["version"])
-        except Exception as exc:  # 物件刪不掉不該讓已完成的刪除看起來失敗
-            console.print(f"  [yellow]⚠[/] {v['spec_key']} 沒刪成功（{exc}），請手動清掉")
+            if v["spec_key"]:
+                get_store().delete_spec(manual_set, v["version"])
+            get_store().delete_meta("manual-set", manual_set, v["version"])
+        except Exception as exc:  # objects failing to go must not make the deletion look failed
+            bucket, key = meta_location("manual-set", manual_set, v["version"])
+            leftovers.append(f"{v['spec_key'] or ''} {bucket}/{key} ({exc})")
+    for leftover in leftovers:
+        console.print(f"  [yellow]⚠[/] could not delete {leftover}; remove it by hand")
     console.print(
-        f"[green]✓[/] 已刪除 {len(plan['versions'])} 個版本"
-        + ("（連同 manual-set 本身）" if plan["removes_manual_set"] else "")
+        f"[green]✓[/] deleted {len(plan['versions'])} versions"
+        + (" (and the manual-set itself)" if plan["removes_manual_set"] else "")
     )
-    console.print("  [dim]原始的影像與標註不受影響[/]")
+    console.print("  [dim]the original images and annotations are untouched[/]")
 
 
 @app.command()
 def export(
-    ref: str = typer.Argument(..., help="manual-set@版本"),
-    out: Path = typer.Option(Path("."), "--out", "-o", help="輸出目錄"),
-    fmt: str = typer.Option("zip", "--format", "-f", help="zip | coco | csv"),
+    ref: str = typer.Argument(..., help="manual-set@version"),
+    out: Path = typer.Option(Path("."), "--out", "-o", help="Output directory"),
+    fmt: str = typer.Option(
+        "zip", "--format", "-f", help="zip | coco | csv | parquet"
+    ),
 ):
-    """匯出成訓練用的格式（COCO json / manifest csv / 打包 zip）。"""
+    """Export to training formats (COCO json / manifest csv / packed zip / manual-set parquet).
+
+    parquet writes the standard manual-set layout — images, cls_annotations,
+    det_annotations, categories and annotators .parquet plus the version's
+    __meta__.md — into <out>/manual-sets/<name>/annotations/<version>/, so
+    `-o ChestDatasetsRoot` puts it where the dataset format expects it.
+    """
+    if fmt not in EXPORT_FORMATS:
+        _die(f"unknown format {fmt!r} (use {', '.join(EXPORT_FORMATS)})")
     db = new_session()
     version_id = _resolve(db, ref)
+
+    if fmt == "parquet":
+        written = export_mod.to_parquet(db, version_id, out)
+        console.print(f"[green]✓[/] exported to {written['dir']}", soft_wrap=True)
+        for name, n in written["rows"].items():
+            console.print(f"  {name}.parquet  {n:,} rows")
+        if not written["meta"]:
+            console.print(
+                f"  [yellow]⚠[/] {ref} has no __meta__.md in object storage, so none "
+                f"was exported; write one with [cyan]cxr meta manual-set {ref}[/]"
+            )
+        return
 
     out.mkdir(parents=True, exist_ok=True)
     stem = ref.replace("@", "_")
     if fmt == "coco":
         path = out / f"{stem}_coco.json"
-        path.write_text(json.dumps(export_mod.to_coco(db, version_id), indent=2, default=str))
+        path.write_text(
+            json.dumps(export_mod.to_coco(db, version_id), indent=2, default=str)
+        )
     elif fmt == "csv":
         path = out / f"{stem}_manifest.csv"
         path.write_text(export_mod.to_manifest_csv(db, version_id))
     else:
         path = out / f"{stem}.zip"
         path.write_bytes(export_mod.to_zip(db, version_id))
-    console.print(f"[green]✓[/] 已匯出 {path}  ({path.stat().st_size:,} bytes)")
+    console.print(f"[green]✓[/] exported {path}  ({path.stat().st_size:,} bytes)")
 
 
 @app.command()
 def explore(
-    name: str = typer.Argument("untitled", help="這次探索的名稱，也是 commit 時的預設 manual-set 名"),
+    name: str = typer.Argument(
+        "untitled",
+        help="Name of this exploration; also the default manual-set name at commit",
+    ),
 ):
-    """開一個互動式的探索 session（跟 Notebook 同一套 API）。
+    """Start a interactive exploration session.
 
-    探索狀態只活在這個 process 的記憶體裡，離開就沒了——要留下來請在
-    裡面用 save 存成 spec 檔，或 commit 產出正式版本。
+    Exploration state only lives in the memory of this process, gone at leaving.
+    To keep it, please use `save` to save it as spec file or `commit` to generate official version.
     """
     from cxr_dataset_manager.cli import repl
 
     repl.run(name)
 
 
-def main() -> None:
-    """CLI 進入點。
+# ---------------------------------------------------------------------------
+# __meta__.md
+# ---------------------------------------------------------------------------
 
-    刻意把例外收成一行訊息——使用者要的是「哪裡寫錯了」，
-    不是 SQLAlchemy 的 traceback。除錯時設 CXR_DEBUG=1 可以看完整堆疊。
+
+def _write_meta(
+    kind: str,
+    name: str,
+    version: str,
+    view: bool,
+    yes: bool,
+    render: Callable[[], str],
+) -> None:
+    """Show, or (re)write, one __meta__.md. `render` asks and returns the text."""
+    from cxr_dataset_manager.storage import get_store
+
+    store = get_store()
+    ref = f"{name}@{version}"
+    existing = store.get_meta(kind, name, version)  # type: ignore[arg-type]
+    if view:
+        if existing is None:
+            _die(f"{ref} has no __meta__.md yet (write one with `cxr meta {kind} {ref}`)")
+        typer.echo(existing, nl=False)
+        return
+    if existing is not None and not yes:
+        if not meta_prompts.interactive():
+            _die(
+                f"{ref} already has a __meta__.md; add --yes to replace it "
+                "(--view shows it)"
+            )
+        if not typer.confirm(
+            f"{ref} already has a __meta__.md. Replace it?", default=False
+        ):
+            raise typer.Abort()
+    location = store.put_meta(kind, name, version, render())  # type: ignore[arg-type]
+    console.print(f"[green]✓[/] wrote {location}", soft_wrap=True)
+
+
+VIEW_OPTION = typer.Option(
+    False, "--view", help="Show the current __meta__.md instead of writing one"
+)
+YES_OPTION = typer.Option(
+    False, "--yes", "-y", help="Replace an existing __meta__.md without asking"
+)
+
+
+@meta_app.command("images")
+def meta_images(
+    ref: str = typer.Argument(..., help="original-set@version of an image batch"),
+    sample: int = typer.Option(
+        50,
+        "--sample",
+        help="How many images to read for the data type, spread across the batch; 0 reads all",
+    ),
+    view: bool = VIEW_OPTION,
+    yes: bool = YES_OPTION,
+):
+    """Write the __meta__.md of an image batch (run after import_image_batch.py).
+
+    The number of images, file extension, data type and resolution are read
+    from the batch; the rest is asked. Stored at
+    original-sets/<set>/images/<version>/__meta__.md.
+    """
+    db = new_session()
+    name, version = _parse_ref(ref)
+    batch = crud.batch_id(db, "image", name, version)
+    if batch is None:
+        _die(f"image batch {ref} not found ([cyan]cxr ls batches[/] lists them)")
+
+    def render() -> str:
+        stats = crud.image_batch_stats(db, batch, sample=sample)
+        if stats["unreadable"]:
+            console.print(
+                f"  [yellow]⚠[/] {len(stats['unreadable'])} images could not be read "
+                f"from object storage (e.g. {stats['unreadable'][0]}); "
+                "the data type comes from the rest"
+            )
+        if set(stats["extensions"]) != {".png"} or set(stats["dtypes"]) - {"uint16"}:
+            console.print(
+                "  [yellow]⚠[/] the dataset format stores images as uint16 .png; found "
+                f"{', '.join(stats['extensions'])} / {', '.join(stats['dtypes']) or '?'}"
+            )
+        return meta_prompts.images_markdown(stats)
+
+    _write_meta("images", name, version, view, yes, render)
+
+
+@meta_app.command("annotations")
+def meta_annotations(
+    ref: str = typer.Argument(..., help="original-set@version of an annotation batch"),
+    view: bool = VIEW_OPTION,
+    yes: bool = YES_OPTION,
+):
+    """Write the __meta__.md of an annotation batch (run after import_annotation_batch.py).
+
+    Statistics and the class distribution are counted from the batch; the rest
+    is asked. Stored at original-sets/<set>/annotations/<version>/__meta__.md.
+    """
+    db = new_session()
+    name, version = _parse_ref(ref)
+    batch = crud.batch_id(db, "annotation", name, version)
+    if batch is None:
+        _die(f"annotation batch {ref} not found ([cyan]cxr ls batches[/] lists them)")
+    _write_meta(
+        "annotations",
+        name,
+        version,
+        view,
+        yes,
+        lambda: meta_prompts.annotations_markdown(crud.annotation_batch_stats(db, batch)),
+    )
+
+
+@meta_app.command("manual-set")
+def meta_manual_set(
+    ref: str = typer.Argument(..., help="manual-set@version"),
+    view: bool = VIEW_OPTION,
+    yes: bool = YES_OPTION,
+):
+    """Write the __meta__.md of a manual-set version.
+
+    Committing a version already writes one; use this to fill it in when the
+    commit had no terminal to ask on, or to correct it. Stored beside the
+    version's spec.yaml.
+    """
+    db = new_session()
+    version_id = _resolve(db, ref)
+    name, version = _parse_ref(ref)
+    _write_meta(
+        "manual-set",
+        name,
+        version,
+        view,
+        yes,
+        lambda: meta_prompts.manual_set_markdown(crud.version_summary(db, version_id)),
+    )
+
+
+def main() -> None:
+    """Entrypoint for the CLI.
+
+    Collapse the exceptions into a single line message——users want to know "where they went wrong",
+    not SQLAlchemy's traceback. Set CXR_DEBUG=1 during debugging to see the full stack trace.
     """
     import os
 
@@ -883,7 +1233,7 @@ def main() -> None:
         if os.environ.get("CXR_DEBUG"):
             raise
         console.print(f"[bold red]✗[/] {type(exc).__name__}: {exc}")
-        console.print("[dim]（設 CXR_DEBUG=1 可看完整堆疊）[/]")
+        console.print("[dim](set CXR_DEBUG=1 for the full traceback)[/]")
         sys.exit(1)
 
 
