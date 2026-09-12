@@ -283,7 +283,7 @@ def test_find_duplicates_shows_every_copy_before_dedup_discards_one(session):
 def test_manual_overrides_go_through_the_session(session):
     session.add_source(original_set="aws_images", annotation_batch="V1")
     session.merge_identical_category()
-    image_id = sorted(session.current.images)[0]
+    image_id = min(session.current.images)
 
     session.exclude_image(image_id, reason="unusable film")
     assert image_id not in session.current.images
@@ -314,7 +314,9 @@ def test_every_conflict_rule_is_reachable_from_the_session(session):
 
 def test_import_list_reports_matches_and_misses(session):
     session.add_source(original_set="aws_images", image_batch="V1")
-    names = sorted(session.catalog.image(i).file_name for i in session.current.images)[:5]
+    names = sorted(session.catalog.image(i).file_name for i in session.current.images)[
+        :5
+    ]
 
     session.import_list(
         original_set="aws_images",

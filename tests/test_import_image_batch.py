@@ -18,7 +18,9 @@ from cxr_dataset_manager.storage import get_store, object_key_for_image
 cv2 = pytest.importorskip("cv2")
 np = pytest.importorskip("numpy")
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "tools" / "import_image_batch.py"
+SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "tools" / "import_image_batch.py"
+)
 OLDER = b"an older object that must survive"
 
 
@@ -52,8 +54,18 @@ def _import(monkeypatch, batch, *flags, prepare=None):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["import_image_batch.py", "-d", str(batch["dir"]), "-s", batch["name"],
-         "-v", "V1", "--workers", "2", *flags],
+        [
+            "import_image_batch.py",
+            "-d",
+            str(batch["dir"]),
+            "-s",
+            batch["name"],
+            "-v",
+            "V1",
+            "--workers",
+            "2",
+            *flags,
+        ],
     )
     module = _script()
     if prepare is not None:
@@ -77,7 +89,9 @@ def _registered(db, name) -> set[str]:
     )
 
 
-def test_by_default_an_object_in_the_bucket_stops_the_import(monkeypatch, batch, db, capsys):
+def test_by_default_an_object_in_the_bucket_stops_the_import(
+    monkeypatch, batch, db, capsys
+):
     _import(monkeypatch, batch)
     assert "--on-image-exists" in capsys.readouterr().out
     assert get_store().get(batch["orphan"]) == OLDER

@@ -366,10 +366,10 @@ def seed_demo(
         start_date=date(2023, 1, 1),
     )
 
-    aws_v1, aws_images = s.add_image_batch(aws, "V1", aws_specs)
-    indo_v1, indo_images = s.add_image_batch(indo, "V1", indo_specs)
-    tb_v1, tb_images = s.add_image_batch(tb, "V1", tb_specs)
-    drlee_v1, drlee_images = s.add_image_batch(drlee, "V1", drlee_specs)
+    _aws_v1, aws_images = s.add_image_batch(aws, "V1", aws_specs)
+    _indo_v1, indo_images = s.add_image_batch(indo, "V1", indo_specs)
+    _tb_v1, tb_images = s.add_image_batch(tb, "V1", tb_specs)
+    _drlee_v1, drlee_images = s.add_image_batch(drlee, "V1", drlee_specs)
 
     # aws V2：V1 前 120 張的前處理產物（等比例縮放 + 直方圖均衡的假想結果），
     # 用 image_lineage 記錄父子關係
@@ -387,7 +387,7 @@ def seed_demo(
                 license_name=parent_spec.license_name,
             )
         )
-    aws_v2, aws_v2_images = s.add_image_batch(aws, "V2", derived_specs)
+    _aws_v2, aws_v2_images = s.add_image_batch(aws, "V2", derived_specs)
     for parent, child in zip(aws_images[:120], aws_v2_images):
         db.add(m.ImageLineage(parent_image_id=parent.id, child_image_id=child.id))
     db.flush()

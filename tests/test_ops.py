@@ -561,7 +561,7 @@ def test_override_can_name_an_annotation_from_a_batch_never_sourced(catalog, db)
     from sqlalchemy import text
 
     cand = src(catalog, "aws_images", annotation_batch="V1")
-    ann_id, image_id = db.execute(
+    ann_id, _image_id = db.execute(
         text(
             """
             SELECT c.id, c.image_id FROM cls_annotations c
@@ -847,12 +847,17 @@ def test_except_subtracts_and_takes_the_annotations_with_it(catalog):
     assert not (rest.cls & half.cls), "被扣掉的影像的標註也要跟著走"
     # CandidateSet 的不變條件：每筆標註的影像都還在集合裡
     for ann_id in rest.cls | rest.det:
-        assert catalog.annotation("cls" if ann_id in rest.cls else "det", ann_id).image_id in rest.images
+        assert (
+            catalog.annotation("cls" if ann_id in rest.cls else "det", ann_id).image_id
+            in rest.images
+        )
 
 
 def test_except_reports_what_it_removed(catalog):
     whole = src(catalog, "aws_images", annotation_batch="V1")
     half = _half(catalog, whole, "except-stats")
-    result = ops.op_except(catalog, [whole, half], ExceptStep(id="e", inputs=["s", "f"]))
+    result = ops.op_except(
+        catalog, [whole, half], ExceptStep(id="e", inputs=["s", "f"])
+    )
     assert result.stats["images_removed"] == len(half.images)
     assert {d.entity_id for d in result.decisions} == half.images

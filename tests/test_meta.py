@@ -33,10 +33,22 @@ def _summary(**overrides):
             {"original_set": "DrLee", "version": "V2", "images": 1},
         ],
         "category_distribution": [
-            {"target": "normal", "cls_pos": 1, "cls_neg": 2, "cls_unknown": 0,
-             "det_pos": 0, "det_all": 0},
-            {"target": "effusion", "cls_pos": 2, "cls_neg": 0, "cls_unknown": 1,
-             "det_pos": 0, "det_all": 1},
+            {
+                "target": "normal",
+                "cls_pos": 1,
+                "cls_neg": 2,
+                "cls_unknown": 0,
+                "det_pos": 0,
+                "det_all": 0,
+            },
+            {
+                "target": "effusion",
+                "cls_pos": 2,
+                "cls_neg": 0,
+                "cls_unknown": 1,
+                "det_pos": 0,
+                "det_all": 1,
+            },
         ],
     }
     return {**summary, **overrides}
@@ -82,6 +94,11 @@ def test_the_image_template_says_when_the_data_type_was_sampled():
 
 
 def test_mixed_values_are_reported_not_hidden_behind_the_majority():
-    stats = {"images": 3, "extensions": {".png": 2, ".jpg": 1}, "dtypes": {},
-             "dtype_checked": 0, "sizes": {}}
+    stats = {
+        "images": 3,
+        "extensions": {".png": 2, ".jpg": 1},
+        "dtypes": {},
+        "dtype_checked": 0,
+        "sizes": {},
+    }
     assert "mixed: `.png` ×2, `.jpg` ×1" in meta.render_images(stats, {})

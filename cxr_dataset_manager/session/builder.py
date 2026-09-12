@@ -230,7 +230,9 @@ class ManualSetSession:
     def union(self, inputs: list[str] | None = None) -> ManualSetSession:
         branches = inputs or self._open_branches()
         if len(branches) < 2:
-            raise SpecError(f"union needs at least two branches; there is only {branches}")
+            raise SpecError(
+                f"union needs at least two branches; there is only {branches}"
+            )
         return self._apply(UnionStep(id=self._next_id("union"), inputs=branches))
 
     def intersect(self, inputs: list[str] | None = None) -> ManualSetSession:

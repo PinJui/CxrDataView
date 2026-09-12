@@ -446,7 +446,9 @@ def _filter_sample(
             "and were split by image_id instead — no patient-level leakage guarantee for them"
         )
     # 同一個 key 同時出現在留下與丟棄兩邊，代表切割根本沒生效（不該發生）
-    assert not (subjects_kept & subjects_dropped), "a hash_mod split must keep each key on one side"
+    assert not (subjects_kept & subjects_dropped), (
+        "a hash_mod split must keep each key on one side"
+    )
     return StepResult(cand, stats, decisions, warnings)
 
 
@@ -1336,7 +1338,9 @@ def op_manual_override(
             try:
                 ann = catalog.annotation(ov.annotation_kind, ann_id)
             except KeyError:
-                failed.append(f"include_annotation {ann_id} (the catalog did not load this annotation)")
+                failed.append(
+                    f"include_annotation {ann_id} (the catalog did not load this annotation)"
+                )
                 continue
             if ann.image_id not in cand.images:
                 # 標註納入時對應影像必須先在集合裡——這是 schema 的複合外鍵，
@@ -1347,7 +1351,9 @@ def op_manual_override(
                 )
                 continue
             if ann_id in pool:
-                failed.append(f"include_annotation {ann_id} (it is already in the candidate set)")
+                failed.append(
+                    f"include_annotation {ann_id} (it is already in the candidate set)"
+                )
                 continue
             pool.add(ann_id)
             decisions.append(

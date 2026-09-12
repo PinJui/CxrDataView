@@ -350,7 +350,9 @@ def load_spec_from(
                 f"{token} not found. It looks like a path in object storage — "
                 "that location is computed, so just give `<manual-set>@<version>`."
             )
-        raise SpecError(f"{token} not found (give a path to a YAML file, or manual-set@version)")
+        raise SpecError(
+            f"{token} not found (give a path to a YAML file, or manual-set@version)"
+        )
 
     manual_set, version = parse_ref(token)
     version_id = resolve_version(db, manual_set, version)
@@ -995,7 +997,9 @@ def delete_manual_set(
     """
     plan = describe_deletion(db, manual_set, version)
     if not plan["found"]:
-        raise SpecError(f"{manual_set}" + (f"@{version}" if version else "") + " not found")
+        raise SpecError(
+            f"{manual_set}" + (f"@{version}" if version else "") + " not found"
+        )
 
     if plan["removes_manual_set"]:
         db.execute(
@@ -1171,7 +1175,9 @@ def explain(
 def _spec_unavailable(spec: dict[str, Any]) -> str:
     """把 load_spec 的狀態翻成一句能照著處理的話。"""
     if spec["status"] == "none":
-        return "this version has no spec (it was imported with scripts/tools/, not built)"
+        return (
+            "this version has no spec (it was imported with scripts/tools/, not built)"
+        )
     if spec["status"] == "missing":
         return f"{spec['key']} is missing from object storage — the spec was deleted and this version can no longer be reproduced"
     return (

@@ -38,3 +38,18 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint]
+# typer 的官方寫法就是把 typer.Option(...) / typer.Argument(...) 放在參數預設值裡
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# 攔截籠統的例外在這些地方是刻意的，不是漏寫：
+#   cli/      打錯一個字不該讓整個 explore session 掉出去；main() 把例外收成一行
+#   storage   alive() 只是探活，連不上就是連不上
+#   tools/    匯入腳本要在 Ctrl-C（BaseException）時把 S3 與 DB 一起回滾，見 fixed_issues #10
+#   tests/    conftest 用它判斷開發資料庫在不在
+"cxr_dataset_manager/cli/*" = ["BLE001"]
+"cxr_dataset_manager/storage.py" = ["BLE001"]
+"scripts/tools/*" = ["BLE001"]
+"tests/*" = ["BLE001"]

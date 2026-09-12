@@ -380,7 +380,6 @@ def test_load_refuses_a_minio_storage_directory_and_says_what_to_do(shell, tmp_p
     (obj / "xl.meta").write_bytes(b"not a spec")
 
     with pytest.raises(SpecError) as caught:
-        shell.session  # 觸發 fixture
         crud.load_spec_from(shell.db, str(obj))
     message = str(caught.value)
     assert "MinIO" in message and "<manual-set>@<version>" in message
@@ -445,7 +444,7 @@ def test_every_command_runs_at_least_once(shell, tmp_path, capsys):
     assert shell.session.current.counts()["images"] > 0
 
     # include / exclude need an id to point at, which only exists now
-    image_id = sorted(shell.session.current.images)[0]
+    image_id = min(shell.session.current.images)
     run(shell, f'exclude image {image_id} "smoke test"')
     assert image_id not in shell.session.current.images
     run(shell, f'include image {image_id} "back again"')
@@ -455,7 +454,9 @@ def test_every_command_runs_at_least_once(shell, tmp_path, capsys):
     per_image = Counter(catalog.cls(a).image_id for a in shell.session.current.cls)
     spare = next((i for i, n in per_image.items() if n >= 2), None)
     if spare is not None:
-        doomed = next(a for a in shell.session.current.cls if catalog.cls(a).image_id == spare)
+        doomed = next(
+            a for a in shell.session.current.cls if catalog.cls(a).image_id == spare
+        )
         run(shell, f'exclude cls {doomed} "wrong label"')
         assert doomed not in shell.session.current.cls
 
