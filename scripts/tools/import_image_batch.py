@@ -268,7 +268,9 @@ def main():
                     object_key = object_key_for_image(
                         args.set_name, args.batch_version, filepath.name
                     )
-                    backup_key = f"_rollback_backups/{object_key}.{uuid.uuid4().hex}.bak"
+                    backup_key = (
+                        f"_rollback_backups/{object_key}.{uuid.uuid4().hex}.bak"
+                    )
                     try:
                         store.client.copy_object(
                             Bucket=ORIGINAL_SET_BUCKET,

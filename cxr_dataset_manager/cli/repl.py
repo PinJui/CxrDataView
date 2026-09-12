@@ -28,6 +28,7 @@ from cxr_dataset_manager.db import crud
 from cxr_dataset_manager.db.engine import new_session
 from cxr_dataset_manager.session.builder import ManualSetSession
 
+
 def _preview_panel(name: str, p: dict) -> Panel:
     counts, delta = p["counts"], p.get("delta")
     head = (
@@ -262,7 +263,9 @@ class ExploreShell(cmd.Cmd):
         """
         args = self._args(arg)
         if not args:
-            return console.print("  usage: source <name@version> [--image|--annotation]")
+            return console.print(
+                "  usage: source <name@version> [--image|--annotation]"
+            )
         kind = None
         if "--image" in args:
             kind, args = "image", [a for a in args if a != "--image"]
@@ -288,7 +291,9 @@ class ExploreShell(cmd.Cmd):
         """
         args = self._args(arg)
         if len(args) < 2:
-            return console.print("  usage: import <name@version> <list file> [--strict]")
+            return console.print(
+                "  usage: import <name@version> <list file> [--strict]"
+            )
         strict = "--strict" in args
         args = [a for a in args if a != "--strict"]
         name, version, _ = self._resolve_batch(args[0], "image")
@@ -466,7 +471,9 @@ class ExploreShell(cmd.Cmd):
             console.print(
                 f"  [dim]… {len(groups) - limit} more groups (duplicates <n> shows more)[/]"
             )
-        console.print("  [dim]once you have chosen: dedup --keep <image_id>,<image_id>,…[/]")
+        console.print(
+            "  [dim]once you have chosen: dedup --keep <image_id>,<image_id>,…[/]"
+        )
 
     def do_dedup(self, arg: str) -> None:
         """Deduplicate by blake3 — discards duplicate images together with their annotations.
@@ -622,7 +629,9 @@ class ExploreShell(cmd.Cmd):
                     f"    [bold]{ids}[/] [dim]{src}[/] → {', '.join(info['targets'])}"
                     f"  [dim]{', '.join(info['annotators'])} · score {info['max_score']}[/]"
                 )
-        console.print('  [dim]to choose yourself: resolve manual <annotation_id> ["reason"][/]')
+        console.print(
+            '  [dim]to choose yourself: resolve manual <annotation_id> ["reason"][/]'
+        )
 
     def do_resolve(self, arg: str) -> None:
         """Settle conflicts. What a rule cannot decide is left alone, never settled silently.
@@ -698,7 +707,9 @@ class ExploreShell(cmd.Cmd):
                 "  [dim]ids come from the output of images / duplicates / conflicts[/]"
             )
         if not args[1].isdigit():
-            return console.print(f"  [red]✗[/] the id must be a number, got {args[1]!r}")
+            return console.print(
+                f"  [red]✗[/] the id must be a number, got {args[1]!r}"
+            )
         self.session.override_one(
             include=include,
             kind=args[0],

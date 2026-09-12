@@ -131,7 +131,6 @@ def test_provenance_explains_every_dropped_image(db, spec):
     try:
         result = build(db, spec, name, "V1", author=TEST_AUTHOR)
         version_id = result.manual_set_version_id
-        catalog = result.execution.catalog
 
         # 找一張進來過又被踢掉的影像，確認 why 說得出是哪一步、什麼原因。
         # 「進來過」直接看第一步的 CandidateSet——source 不再逐筆記錄 added，
@@ -141,7 +140,7 @@ def test_provenance_explains_every_dropped_image(db, spec):
         dropped = entered - result.execution.final.images
         assert dropped, "測試前提：這份 spec 應該要踢掉一些影像"
 
-        image_id = sorted(dropped)[0]
+        image_id = min(dropped)
         trail = crud.explain(db, version_id, image_id=image_id)
         assert trail["found"] and not trail["in_final_set"]
         assert trail["spec_key"] == result.spec_key
@@ -266,7 +265,7 @@ def test_provenance_never_attributes_another_images_annotation(db, spec):
         ).all()
         if not collisions:
             pytest.skip("這份 mock 資料沒有 id 撞號的情況")
-        image_id, shared_id = collisions[0]
+        image_id, _shared_id = collisions[0]
 
         trail = crud.explain(db, result.manual_set_version_id, image_id=image_id)
         for entry in trail["trail"]:

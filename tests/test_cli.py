@@ -450,7 +450,10 @@ def test_export_parquet_writes_the_manual_set_layout(built, db, tmp_path):
 
     meta_md = (out / "__meta__.md").read_text()
     for name in (r["name"] for r in cats):
-        assert f"| {name} | {next(c['id'] for c in cats if c['name'] == name)} |" in meta_md
+        assert (
+            f"| {name} | {next(c['id'] for c in cats if c['name'] == name)} |"
+            in meta_md
+        )
 
 
 def test_export_refuses_an_unknown_format(built):
@@ -471,7 +474,9 @@ def test_build_writes_the_meta_beside_the_spec(built, db):
     assert "- **Creator:**\n    pytest <pytest@example.com>" in md
     assert f"| **Images** | {summary['images']} |" in md
     for source in summary["composition"]:
-        assert f"| {source['original_set']} | {source['version']} | See spec.yaml |" in md
+        assert (
+            f"| {source['original_set']} | {source['version']} | See spec.yaml |" in md
+        )
     assert "- **Description:** N/A" in md
 
 

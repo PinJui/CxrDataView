@@ -23,7 +23,9 @@ OnMissing = Literal["error", "warn", "ignore"]
 class StepBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(..., min_length=1, description="step name; also how `cxr why` reports the step")
+    id: str = Field(
+        ..., min_length=1, description="step name; also how `cxr why` reports the step"
+    )
 
     def input_ids(self) -> list[str]:
         return []
@@ -69,7 +71,9 @@ class FileNamesRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    source: str | None = Field(None, description="a note for humans; never used to locate the list")
+    source: str | None = Field(
+        None, description="a note for humans; never used to locate the list"
+    )
 
 
 class ImportListStep(StepBase):
@@ -82,7 +86,8 @@ class ImportListStep(StepBase):
     file_names_ref: FileNamesRef | None = None
     on_missing: OnMissing = "error"
     with_annotations: bool = Field(
-        True, description="also bring in the annotations these images already have (as source does)"
+        True,
+        description="also bring in the annotations these images already have (as source does)",
     )
 
     @model_validator(mode="after")
@@ -251,7 +256,8 @@ class CategoryMapStep(StepBase):
         description="first merge identically named local categories into a target of the same name (design_doc §3)",
     )
     require_total: bool = Field(
-        True, description="require every local category in the candidate set to be mapped, or fail"
+        True,
+        description="require every local category in the candidate set to be mapped, or fail",
     )
     drop_unmapped: bool = Field(
         True,
@@ -280,7 +286,9 @@ class ConflictRule(BaseModel):
     @model_validator(mode="after")
     def _needs_params(self) -> ConflictRule:
         if self.rule == "annotator_precedence" and not self.annotator_precedence:
-            raise ValueError("rule=annotator_precedence needs an annotator_precedence list")
+            raise ValueError(
+                "rule=annotator_precedence needs an annotator_precedence list"
+            )
         if self.rule == "batch_version_precedence" and not self.version_precedence:
             raise ValueError(
                 "rule=batch_version_precedence needs a version_precedence list"

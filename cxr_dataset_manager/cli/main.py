@@ -399,9 +399,7 @@ def lists_show(
     for name in shown:
         console.print(f"  {name}")
     if len(shown) < len(names):
-        console.print(
-            f"  [dim]… {len(names) - len(shown):,} more (-n 0 prints all)[/]"
-        )
+        console.print(f"  [dim]… {len(names) - len(shown):,} more (-n 0 prints all)[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +459,9 @@ def build(
     ),
     version: str = typer.Option("V1", "--version", "-v"),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Run everything but write nothing; just show the result"
+        False,
+        "--dry-run",
+        help="Run everything but write nothing; just show the result",
     ),
     author_name: str | None = typer.Option(
         None, "--author-name", help="Name of the builder"
@@ -580,7 +580,10 @@ def show(
 def spec(
     ref: str = typer.Argument(..., help="manual-set@version"),
     out: Path | None = typer.Option(
-        None, "--out", "-o", help="Save it as a YAML file (without this it is only shown)"
+        None,
+        "--out",
+        "-o",
+        help="Save it as a YAML file (without this it is only shown)",
     ),
 ):
     """Show the spec of a certain version, or save it to a YAML file.
@@ -686,7 +689,9 @@ def _print_image_usage(d: dict) -> None:
 
 @app.command()
 def image(
-    ref: str = typer.Argument(..., help="An image_id, or original_set/version/file_name"),
+    ref: str = typer.Argument(
+        ..., help="An image_id, or original_set/version/file_name"
+    ),
     version: str | None = typer.Option(
         None,
         "--version",
@@ -939,7 +944,9 @@ def rm(
 
     if not yes:
         if not sys.stdin.isatty():
-            die("Refusing to delete without a terminal to confirm. Add --yes if you mean it.")
+            die(
+                "Refusing to delete without a terminal to confirm. Add --yes if you mean it."
+            )
         if not typer.confirm("Delete?"):
             console.print("  [dim]cancelled[/]")
             raise typer.Abort()
@@ -955,7 +962,9 @@ def rm(
             if v["spec_key"]:
                 get_store().delete_spec(manual_set, v["version"])
             get_store().delete_meta("manual-set", manual_set, v["version"])
-        except Exception as exc:  # objects failing to go must not make the deletion look failed
+        except (
+            Exception
+        ) as exc:  # objects failing to go must not make the deletion look failed
             bucket, key = meta_location("manual-set", manual_set, v["version"])
             leftovers.append(f"{v['spec_key'] or ''} {bucket}/{key} ({exc})")
     for leftover in leftovers:
@@ -971,9 +980,7 @@ def rm(
 def export(
     ref: str = typer.Argument(..., help="manual-set@version"),
     out: Path = typer.Option(Path("."), "--out", "-o", help="Output directory"),
-    fmt: str = typer.Option(
-        "zip", "--format", "-f", help="zip | coco | csv | parquet"
-    ),
+    fmt: str = typer.Option("zip", "--format", "-f", help="zip | coco | csv | parquet"),
 ):
     """Export to training formats (COCO json / manifest csv / packed zip / manual-set parquet).
 
@@ -1053,7 +1060,9 @@ def _write_meta(
     existing = store.get_meta(kind, name, version)  # type: ignore[arg-type]
     if view:
         if existing is None:
-            die(f"{ref} has no __meta__.md yet (write one with `cxr meta {kind} {ref}`)")
+            die(
+                f"{ref} has no __meta__.md yet (write one with `cxr meta {kind} {ref}`)"
+            )
         typer.echo(existing, nl=False)
         return
     if existing is not None and not yes:
@@ -1141,7 +1150,9 @@ def meta_annotations(
         version,
         view,
         yes,
-        lambda: meta_prompts.annotations_markdown(crud.annotation_batch_stats(db, batch)),
+        lambda: meta_prompts.annotations_markdown(
+            crud.annotation_batch_stats(db, batch)
+        ),
     )
 
 

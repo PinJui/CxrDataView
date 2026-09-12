@@ -296,7 +296,9 @@ def to_parquet(db: Session, version_id: int, out_root: Path) -> dict[str, Any]:
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
-    except ImportError as exc:  # pragma: no cover - the parquet group installs by default
+    except (
+        ImportError
+    ) as exc:  # pragma: no cover - the parquet group installs by default
         raise SpecError(
             "parquet export needs pyarrow: poetry install --with parquet"
         ) from exc
@@ -338,9 +340,7 @@ def to_parquet(db: Session, version_id: int, out_root: Path) -> dict[str, Any]:
             {
                 "id": col(range(1, len(cls) + 1), int64),
                 "image_id": col((image_ids[r["image_id"]] for r in cls), int64),
-                "category_id": col(
-                    (cat_ids[r["target_category"]] for r in cls), int64
-                ),
+                "category_id": col((cat_ids[r["target_category"]] for r in cls), int64),
                 "score": col((float(r["score"]) for r in cls), float64),
                 "annotator_id": col(
                     (annotator_ids[r["annotator"]] for r in cls), int64
@@ -352,9 +352,7 @@ def to_parquet(db: Session, version_id: int, out_root: Path) -> dict[str, Any]:
             {
                 "id": col(range(1, len(det) + 1), int64),
                 "image_id": col((image_ids[r["image_id"]] for r in det), int64),
-                "category_id": col(
-                    (cat_ids[r["target_category"]] for r in det), int64
-                ),
+                "category_id": col((cat_ids[r["target_category"]] for r in det), int64),
                 "bbox": col(
                     ([float(x) for x in r["bbox"]] for r in det), pa.list_(float64)
                 ),

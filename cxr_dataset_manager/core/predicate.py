@@ -191,7 +191,9 @@ def _eval(node: ast.AST, row: dict[str, Any]) -> Any:
                 return False
             left = right
         return True
-    raise SpecError(f"predicate evaluation hit an unsupported node {type(node).__name__}")
+    raise SpecError(
+        f"predicate evaluation hit an unsupported node {type(node).__name__}"
+    )
 
 
 def evaluate(

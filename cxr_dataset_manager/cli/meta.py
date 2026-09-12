@@ -59,7 +59,7 @@ def _builder() -> str | None:
 
 
 def _today() -> str:
-    return dt.date.today().strftime("%Y/%m/%d")
+    return dt.datetime.now().astimezone().strftime("%Y/%m/%d")
 
 
 def images_markdown(stats: Mapping[str, Any]) -> str:
