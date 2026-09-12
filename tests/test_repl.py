@@ -393,3 +393,145 @@ def test_a_missing_object_path_suggests_the_ref_form(shell):
             shell.db, "/data/minio/manual-sets/m/annotations/V1/spec.yaml"
         )
     assert "<manual-set>@<version>" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# Every command runs at least once
+#
+# This file used to cover the nine verbs whose parsing had bitten us and
+# nothing else: 29 of the shell's methods had never been executed by any test.
+# That is the same gap `cxr show` fell through (see fixed_issues.md), so the
+# rule test_cli.py applies to `cxr` applies here too — every command runs, the
+# session survives it, and nothing reports an error.
+# ---------------------------------------------------------------------------
+
+
+def _no_failures(capsys) -> str:
+    out = capsys.readouterr().out
+    assert "Traceback" not in out, out
+    assert "✗" not in out, out
+    return out
+
+
+def test_every_command_runs_at_least_once(shell, tmp_path, capsys):
+    from collections import Counter
+
+    # with no steps at all these must say so, not crash on the empty session
+    run(shell, "", "batches", "preview", "steps", "undo")
+    run(shell, "source aws_images@V1 --annotation")
+
+    catalog, current = shell.session.catalog, shell.session.current
+    picks = tmp_path / "picks.txt"
+    picks.write_text(
+        "\n".join(sorted(catalog.image(i).file_name for i in current.images)[:20])
+    )
+
+    run(
+        shell,
+        "categories",  # before mapping: the "not mapped yet" table
+        "merge_identical",
+        "categories",  # after: every local category is mapped
+        "conflicts",
+        "duplicates 3",
+        "images 3",
+        "preview",
+        "filter width >= 0",
+        f"pick {picks}",
+        "balance 100 --seed smoke",
+        "spec",
+        "debug on",
+        "debug off",
+    )
+    assert shell.session.current.counts()["images"] > 0
+
+    # include / exclude need an id to point at, which only exists now
+    image_id = sorted(shell.session.current.images)[0]
+    run(shell, f'exclude image {image_id} "smoke test"')
+    assert image_id not in shell.session.current.images
+    run(shell, f'include image {image_id} "back again"')
+    assert image_id in shell.session.current.images
+
+    # excluding an annotation is only legal where the image keeps a label
+    per_image = Counter(catalog.cls(a).image_id for a in shell.session.current.cls)
+    spare = next((i for i, n in per_image.items() if n >= 2), None)
+    if spare is not None:
+        doomed = next(a for a in shell.session.current.cls if catalog.cls(a).image_id == spare)
+        run(shell, f'exclude cls {doomed} "wrong label"')
+        assert doomed not in shell.session.current.cls
+
+    # each set operation consumes the branches that are still open
+    run(shell, "source TB-portal@V1 --annotation", "union")
+    run(shell, "source DrLee@V1 --annotation", "except")
+    run(shell, "source TB-portal@V1 --annotation", "intersect")
+    run(shell, "checkpoint smoke", "rollback smoke")
+    _no_failures(capsys)
+
+
+def test_a_command_missing_its_arguments_prints_usage(shell, capsys):
+    """Typing a verb with nothing after it is how people discover it."""
+    run(shell, "source aws_images@V1 --annotation")
+    capsys.readouterr()
+    for line in (
+        "source",
+        "import",
+        "split",
+        "balance",
+        "filter",
+        "pick",
+        "map",
+        "resolve",
+        "exclude",
+        "include",
+        "checkpoint",
+        "rollback",
+        "checkout",
+        "load",
+        "dedup --keep",
+    ):
+        steps_before = len(shell.session.steps)
+        run(shell, line)
+        out = capsys.readouterr().out
+        assert "usage" in out.lower(), f"{line!r} printed no usage: {out}"
+        assert "Traceback" not in out, line
+        assert len(shell.session.steps) == steps_before, f"{line!r} changed the session"
+
+
+def test_every_completer_offers_candidates(shell):
+    """Tab completion is reachable only through these; nothing else calls them."""
+    run(shell, "source aws_images@V1 --annotation")
+    assert shell.complete_source("aws", "source aws", 7, 10)
+    assert shell.complete_import("aws", "import aws", 7, 10)
+    assert shell.complete_dedup("aws", "dedup aws", 6, 9)
+    # scopes are offered while categories are still unmapped
+    assert shell.complete_map("aws", "map aws", 4, 7)
+    assert shell.complete_resolve("a", "resolve a", 8, 9) == ["annotator"]
+    assert shell.complete_exclude("i", "exclude i", 8, 9) == ["image"]
+    assert shell.complete_include("c", "include c", 8, 9) == ["cls"]
+
+    run(shell, "checkpoint cp")
+    assert shell.complete_rollback("c", "rollback c", 9, 10) == ["cp"]
+    assert shell.complete_checkout("source", "checkout source", 9, 15) == ["source_1"]
+
+
+def test_quit_says_what_is_about_to_be_lost(shell, capsys):
+    run(shell, "source aws_images@V1 --annotation")
+    capsys.readouterr()
+    assert shell.onecmd("quit") is True
+    assert "will not be kept" in capsys.readouterr().out
+
+
+def test_ctrl_c_cancels_the_line_not_the_session(monkeypatch, capsys):
+    """The session is unsaved work; Ctrl-C must not throw it away."""
+    from cxr_dataset_manager.cli import repl as repl_mod
+
+    rounds = []
+
+    def fake_cmdloop(self, intro=""):
+        rounds.append(1)
+        if len(rounds) == 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(repl_mod.ExploreShell, "cmdloop", fake_cmdloop)
+    repl_mod.run(f"pytest_{uuid.uuid4().hex[:8]}")
+    assert len(rounds) == 2, "the loop must resume after a Ctrl-C"
+    assert "^C" in capsys.readouterr().out

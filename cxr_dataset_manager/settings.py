@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
     s3_access_key_id: str | None = "minioadmin"
     s3_secret_access_key: str | None = "minioadmin"
-    presigned_url_expire_seconds: int = 3600
 
     # 誰建的資料集。設在 .env 就不用每次 commit 都打；沒設的話 CLI 會問。
     author_name: str | None = None

@@ -230,3 +230,99 @@ def test_preview_and_show_report_the_same_category_distribution(session, db):
     finally:
         db.execute(text("DELETE FROM manual_sets WHERE name = :n"), {"n": session.name})
         db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Session API：notebook 走的就是這些包裝，但它們一個都沒被測過
+# ---------------------------------------------------------------------------
+
+
+def test_set_operations_combine_the_open_branches(session):
+    session.add_source(original_set="aws_images", annotation_batch="V1")
+    whole = set(session.current.images)
+    session.add_source(original_set="aws_images", annotation_batch="V1")
+    session.split(mod=2, keep_remainder=[0], seed="halves", key_field="image_id")
+    half = set(session.current.images)
+    assert half < whole, "測試前提：要真的切掉一部分"
+
+    session.exclude()  # 第一條分支扣掉第二條
+    assert session.current.images == whole - half
+
+    session.add_source(original_set="aws_images", annotation_batch="V1")
+    session.intersect()  # 剩下的那些，再跟整批取交集
+    assert session.current.images == whole - half
+
+
+def test_balance_is_reachable_from_the_session(session):
+    session.add_source(original_set="aws_images", annotation_batch="V1")
+    session.merge_identical_category()
+    before = len(session.current.images)
+
+    session.balance(max_per_class=20, seed="session-balance")
+    assert session.steps[-1].criterion == "balance"
+    assert len(session.current.images) < before
+    stats = session.reports[session.head].stats
+    assert stats["class_counts_before"] and stats["class_counts_after"]
+
+
+def test_find_duplicates_shows_every_copy_before_dedup_discards_one(session):
+    """先看清楚每一組帶了什麼，才決定留哪一張（design_doc §6）。"""
+    session.add_source(original_set="DrLee", annotation_batch="V1")
+    session.add_source(original_set="aws_images", image_batch="V1")
+    session.union()
+
+    groups = session.find_duplicates()
+    assert groups, "測試資料本來就有跨來源重複"
+    for group in groups:
+        assert len(group["candidates"]) > 1
+        for candidate in group["candidates"]:
+            assert candidate["image_id"] in session.current.images
+            assert candidate["ref"] and "labels" in candidate
+
+
+def test_manual_overrides_go_through_the_session(session):
+    session.add_source(original_set="aws_images", annotation_batch="V1")
+    session.merge_identical_category()
+    image_id = sorted(session.current.images)[0]
+
+    session.exclude_image(image_id, reason="unusable film")
+    assert image_id not in session.current.images
+
+    session.override_one(include=True, kind="image", target_id=image_id, reason="back")
+    assert image_id in session.current.images
+
+    with pytest.raises(SpecError, match="unknown target"):
+        session.override_one(include=True, kind="nonsense", target_id=image_id)
+
+
+def test_every_conflict_rule_is_reachable_from_the_session(session):
+    session.add_source(original_set="aws_images", annotation_batch="V1")
+    session.add_source(original_set="aws_images", annotation_batch="V2")
+    session.union()
+    session.merge_identical_category()
+
+    before = len(session.unresolved_conflicts())
+    assert before, "測試前提：V1 與 V2 要對同一批影像有矛盾"
+
+    session.resolve_conflicts_by_annotation_version(["V2", "V1"])
+    after_version = len(session.unresolved_conflicts())
+    assert after_version < before
+
+    session.resolve_conflicts_by_score()
+    assert len(session.unresolved_conflicts()) <= after_version
+
+
+def test_import_list_reports_matches_and_misses(session):
+    session.add_source(original_set="aws_images", image_batch="V1")
+    names = sorted(session.catalog.image(i).file_name for i in session.current.images)[:5]
+
+    session.import_list(
+        original_set="aws_images",
+        image_batch="V1",
+        file_names=[*names, "definitely_not_here.png"],
+        on_missing="warn",
+    )
+    report = session.last_import_report()
+    assert (report.matched_count, report.missing_count, report.requested) == (5, 1, 6)
+    assert report.missing == ["definitely_not_here.png"]
+    assert "matched=5/6" in repr(report)

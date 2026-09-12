@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
@@ -56,15 +55,3 @@ def apply_schema(engine: Engine, drop_first: bool = False) -> None:
             conn.execute(text("DROP SCHEMA public CASCADE"))
             conn.execute(text("CREATE SCHEMA public"))
         conn.execute(text(SCHEMA_FILE.read_text()))
-
-
-def get_db() -> Iterator[Session]:
-    """用完一定把連線還回 pool 的 context helper。
-
-    少了這個 finally，一批並發查詢就會把連線池抽乾，看起來像整個程式當掉。
-    """
-    db = new_session()
-    try:
-        yield db
-    finally:
-        db.close()
