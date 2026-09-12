@@ -17,28 +17,101 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
-from rich.table import Table
 
+from cxr_dataset_manager.cli._common import console, resolve_author, table
+from cxr_dataset_manager.cli.meta import on_commit
 from cxr_dataset_manager.core.types import SpecError
 from cxr_dataset_manager.db import crud
 from cxr_dataset_manager.db.engine import new_session
 from cxr_dataset_manager.session.builder import ManualSetSession
 
-console = Console()
+def _preview_panel(name: str, p: dict) -> Panel:
+    counts, delta = p["counts"], p.get("delta")
+    head = (
+        f"Images [bold]{counts['images']}[/]  cls [bold]{counts['cls']}[/]  "
+        f"det [bold]{counts['det']}[/]"
+    )
+    if delta:
+        head += (
+            f"\nLast step: images {delta['images']:+d}"
+            f" (in {delta['images_added']} / out {delta['images_removed']})"
+        )
+    head += (
+        f"\nSubjects {p['subjects']['distinct']}"
+        f" ({p['subjects']['images_without_subject']} images without subject information)"
+        f"   unannotated images {p['annotation_coverage']['images_without_annotation']}"
+    )
+    return Panel(head, title=f"[cyan]{name}[/]")
 
 
-def _table(title: str, columns: list[str], rows: list[list[Any]]) -> Table:
-    table = Table(title=title, header_style="bold cyan", title_justify="left")
-    for col in columns:
-        table.add_column(col)
-    for row in rows:
-        table.add_row(*["" if c is None else str(c) for c in row])
-    return table
+def _print_preview_tables(p: dict) -> None:
+    """Where the images came from, and what they are labelled."""
+    if p["by_source"]:
+        console.print(
+            table(
+                "Sources",
+                ["source", "images"],
+                [[k, v] for k, v in p["by_source"].items()],
+            )
+        )
+    dist = p["by_target_category"] or p["by_local_category"]
+    if dist:
+        console.print(
+            table(
+                "Categories",
+                ["category", "annotations"],
+                [[k, v] for k, v in dist.items()],
+            )
+        )
+
+
+def _print_preview_distribution(p: dict) -> None:
+    """Per-target POS / NEG / UNKNOWN, and the two things that table can hide."""
+    counts = p["counts"]
+    rows = [
+        r
+        for r in p["category_distribution"]
+        if r["det_all"]
+        or r["cls_pos"]
+        or r["cls_neg"]
+        or r["cls_unknown"] < counts["images"]
+    ]
+    if not rows:
+        return
+    console.print(
+        table(
+            f"Category distribution (cls counted in images, "
+            f"{counts['images']} in all; det in boxes)",
+            ["target category", "CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"],
+            [
+                [
+                    r["target"],
+                    r["cls_pos"],
+                    r["cls_neg"],
+                    r["cls_unknown"],
+                    r["det_pos"],
+                ]
+                for r in rows
+            ],
+        )
+    )
+    if any(
+        r["cls_pos"] + r["cls_neg"] + r["cls_unknown"] != counts["images"] for r in rows
+    ):
+        console.print(
+            "  [yellow]⚠[/] for some targets the three cls columns do not add "
+            "up to the image count — different sources call one image positive "
+            "and negative, so the conflicts have not converged yet "
+            "(type conflicts; after resolve they agree)"
+        )
+    unscored = sum(r["det_no_score"] for r in rows)
+    if unscored:
+        console.print(
+            f"  [yellow]⚠[/] {unscored} det boxes have no score and are not counted in DET POS"
+        )
 
 
 class ExploreShell(cmd.Cmd):
@@ -302,7 +375,7 @@ class ExploreShell(cmd.Cmd):
         self._report()
         report = self.session.reports[self.session.head].stats
         console.print(
-            _table(
+            table(
                 "Class distribution",
                 ["class", "before", "after"],
                 [
@@ -449,7 +522,7 @@ class ExploreShell(cmd.Cmd):
         report = self.session.preview_categories()
         if report["targets"]:
             console.print(
-                _table(
+                table(
                     "Mapped",
                     ["target", "from local categories"],
                     [
@@ -460,7 +533,7 @@ class ExploreShell(cmd.Cmd):
             )
         if report["unmapped"]:
             console.print(
-                _table(
+                table(
                     "[red]Not mapped yet[/]",
                     ["scope", "local category", "annotations"],
                     [
@@ -534,7 +607,7 @@ class ExploreShell(cmd.Cmd):
             "merely repeat the same categories"
         )
         console.print(
-            _table(
+            table(
                 "Source pairs",
                 ["pair", "images"],
                 [[k, v] for k, v in summary["by_source_pair"].items()],
@@ -670,80 +743,9 @@ class ExploreShell(cmd.Cmd):
         if not self.session.head:
             return console.print("  [dim]no steps yet[/]")
         p = self.session.preview()
-        counts, delta = p["counts"], p.get("delta")
-        head = (
-            f"Images [bold]{counts['images']}[/]  cls [bold]{counts['cls']}[/]  "
-            f"det [bold]{counts['det']}[/]"
-        )
-        if delta:
-            head += (
-                f"\nLast step: images {delta['images']:+d}"
-                f" (in {delta['images_added']} / out {delta['images_removed']})"
-            )
-        head += (
-            f"\nSubjects {p['subjects']['distinct']}"
-            f" ({p['subjects']['images_without_subject']} images without subject information)"
-            f"   unannotated images {p['annotation_coverage']['images_without_annotation']}"
-        )
-        console.print(Panel(head, title=f"[cyan]{self.session.name}[/]"))
-        if p["by_source"]:
-            console.print(
-                _table(
-                    "Sources",
-                    ["source", "images"],
-                    [[k, v] for k, v in p["by_source"].items()],
-                )
-            )
-        dist = p["by_target_category"] or p["by_local_category"]
-        if dist:
-            console.print(
-                _table(
-                    "Categories",
-                    ["category", "annotations"],
-                    [[k, v] for k, v in dist.items()],
-                )
-            )
-        rows = [
-            r
-            for r in p["category_distribution"]
-            if r["det_all"]
-            or r["cls_pos"]
-            or r["cls_neg"]
-            or r["cls_unknown"] < counts["images"]
-        ]
-        if rows:
-            console.print(
-                _table(
-                    f"Category distribution (cls counted in images, "
-                    f"{counts['images']} in all; det in boxes)",
-                    ["target category", "CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"],
-                    [
-                        [
-                            r["target"],
-                            r["cls_pos"],
-                            r["cls_neg"],
-                            r["cls_unknown"],
-                            r["det_pos"],
-                        ]
-                        for r in rows
-                    ],
-                )
-            )
-            if any(
-                r["cls_pos"] + r["cls_neg"] + r["cls_unknown"] != counts["images"]
-                for r in rows
-            ):
-                console.print(
-                    "  [yellow]⚠[/] for some targets the three cls columns do not add "
-                    "up to the image count — different sources call one image positive "
-                    "and negative, so the conflicts have not converged yet "
-                    "(type conflicts; after resolve they agree)"
-                )
-            unscored = sum(r["det_no_score"] for r in rows)
-            if unscored:
-                console.print(
-                    f"  [yellow]⚠[/] {unscored} det boxes have no score and are not counted in DET POS"
-                )
+        console.print(_preview_panel(self.session.name, p))
+        _print_preview_tables(p)
+        _print_preview_distribution(p)
         if p["categories"]["unmapped_local"]:
             console.print(
                 f"  [yellow]⚠[/] {len(p['categories']['unmapped_local'])} local "
@@ -756,7 +758,7 @@ class ExploreShell(cmd.Cmd):
         if not rows:
             return console.print("  [dim]No steps yet[/]")
         console.print(
-            _table(
+            table(
                 "Pipeline",
                 ["#", "step_id", "op", "inputs", "images", "cls", "det", "branch", ""],
                 [
@@ -813,7 +815,7 @@ class ExploreShell(cmd.Cmd):
                 ]
             )
         console.print(
-            _table(
+            table(
                 f"Images (first {len(ids)} of {len(cand.images)})",
                 ["id", "image", "subject", "categories"],
                 rows,
@@ -824,7 +826,7 @@ class ExploreShell(cmd.Cmd):
     def do_batches(self, arg: str) -> None:
         """List every batch that can be a source."""
         console.print(
-            _table(
+            table(
                 "Batches",
                 ["in a spec", "kind", "items", "categories"],
                 [
@@ -971,9 +973,6 @@ class ExploreShell(cmd.Cmd):
         source was selected. It is stored beside the spec, and
         `cxr meta manual-set` rewrites it later.
         """
-        from cxr_dataset_manager.cli.main import _resolve_author
-        from cxr_dataset_manager.cli.meta import on_commit
-
         args = self._args(arg)
         opts = self._kv(args)
         dry = "--dry-run" in args
@@ -985,7 +984,7 @@ class ExploreShell(cmd.Cmd):
         author = (
             None
             if dry
-            else _resolve_author(opts.get("author-name"), opts.get("author-email"))
+            else resolve_author(opts.get("author-name"), opts.get("author-email"))
         )
         result = self.session.commit(
             version=version,

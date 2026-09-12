@@ -9,29 +9,22 @@ written anyway — `cxr meta ... --yes` replaces the file later.
 from __future__ import annotations
 
 import datetime as dt
-import sys
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 import typer
-from rich.console import Console
 from rich.markup import escape
 from sqlalchemy.orm import Session
 
+from cxr_dataset_manager.cli._common import console, interactive
 from cxr_dataset_manager.core import meta
 from cxr_dataset_manager.db import crud
 from cxr_dataset_manager.settings import settings
-
-console = Console()
 
 HOW_TO_ANSWER = (
     "[dim]An answer may span several lines; an empty line ends it. "
     "Pressing Enter straight away keeps the default.[/]"
 )
-
-
-def interactive() -> bool:
-    return sys.stdin.isatty()
 
 
 def ask(question: meta.Question) -> str:

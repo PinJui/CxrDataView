@@ -12,14 +12,20 @@ from collections.abc import Callable
 from pathlib import Path
 
 import typer
-from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
-from rich.table import Table
 
 from cxr_dataset_manager.cli import meta as meta_prompts
+from cxr_dataset_manager.cli._common import (
+    console,
+    die,
+    interactive,
+    parse_ref,
+    resolve_author,
+    resolve_version_id,
+    table,
+)
 from cxr_dataset_manager.core import export as export_mod
-from cxr_dataset_manager.core.engine import Author
 from cxr_dataset_manager.core.engine import build as run_build
 from cxr_dataset_manager.core.schema import BuildSpec
 from cxr_dataset_manager.core.types import SpecError
@@ -43,10 +49,6 @@ app.add_typer(db_app, name="db")
 app.add_typer(ls_app, name="ls")
 app.add_typer(lists_app, name="lists")
 app.add_typer(meta_app, name="meta")
-
-console = Console()
-# Errors go to stderr, apart from normal output, so piping into grep does not mix them.
-err_console = Console(stderr=True)
 
 EXPORT_FORMATS = ("zip", "coco", "csv", "parquet")
 
@@ -74,7 +76,7 @@ def _print_category_distribution(rows: list[dict], total_images: int) -> None:
     if not rows:
         return
     console.print(
-        _table(
+        table(
             f"Category distribution (cls counted in images, {total_images} in all; det in boxes)",
             ["target category", "CLS POS", "CLS NEG", "CLS UNKNOWN", "DET POS"],
             [
@@ -96,69 +98,6 @@ def _print_category_distribution(rows: list[dict], total_images: int) -> None:
         console.print(
             f"  [yellow]⚠[/] {unscored} det boxes have no score and are not counted in DET POS"
         )
-
-
-def _die(message: str) -> None:
-    err_console.print(f"[bold red]✗[/] {message}")
-    raise typer.Exit(1)
-
-
-def _resolve_author(name: str | None, email: str | None) -> Author:
-    """Who is building this dataset: command flags → .env → ask.
-
-    When nothing can be asked (a script, CI) fail and say how to set it —
-    better than a dataset nobody knows the builder of.
-    """
-
-    name = name or settings.author_name
-    email = email or settings.author_email
-    if not name or not email:
-        if not sys.stdin.isatty():
-            _die(
-                "Who is building this dataset? Pass --author-name / --author-email, "
-                "or set CXR_AUTHOR_NAME and CXR_AUTHOR_EMAIL in .env."
-            )
-        console.print(
-            "[dim]The dataset records who built it "
-            "(set CXR_AUTHOR_NAME / CXR_AUTHOR_EMAIL to skip this question)[/]"
-        )
-        name = name or typer.prompt("Your name")
-        email = email or typer.prompt("Your email")
-    try:
-        return Author(name=name, email=email)
-    except SpecError as exc:
-        _die(str(exc))
-        raise
-
-
-def _parse_ref(ref: str) -> tuple[str, str]:
-    try:
-        return crud.parse_ref(ref)
-    except SpecError as exc:
-        _die(str(exc))
-        raise
-
-
-def _resolve(db, ref: str) -> int:
-    """`name@version` → manual_set_version_id, or exit saying what is wrong.
-
-    Every query command does the same thing; one function means none of them
-    forgets the check.
-    """
-    name, version = _parse_ref(ref)
-    version_id = crud.resolve_version(db, name, version)
-    if version_id is None:
-        _die(f"{ref} not found ([cyan]cxr ls manual-sets[/] lists what exists)")
-    return version_id
-
-
-def _table(title: str, columns: list[str], rows: list[list]) -> Table:
-    table = Table(title=title, header_style="bold cyan", title_justify="left")
-    for col in columns:
-        table.add_column(col)
-    for row in rows:
-        table.add_row(*["" if c is None else str(c) for c in row])
-    return table
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +130,7 @@ def db_seed(
     if with_images:
         store = get_store()
         if not store.alive():
-            _die(
+            die(
                 f"cannot reach object storage at {settings.s3_endpoint_url} "
                 "(--no-with-images seeds the metadata only)"
             )
@@ -199,7 +138,7 @@ def db_seed(
 
     counts = seed_demo(new_session(), store)
     console.print(
-        _table("Mock data", ["table", "rows"], [[k, v] for k, v in counts.items()])
+        table("Mock data", ["table", "rows"], [[k, v] for k, v in counts.items()])
     )
 
 
@@ -244,7 +183,7 @@ def db_status():
             "[green]ok[/]" if store.alive() else "[red]unreachable[/]",
         ]
     )
-    console.print(_table("Services", ["component", "location", "status"], rows))
+    console.print(table("Services", ["component", "location", "status"], rows))
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +196,7 @@ def ls_sets():
     """List every original-set."""
     rows = crud.list_original_sets(new_session())
     console.print(
-        _table(
+        table(
             "Original sets",
             ["name", "image batches", "annotation batches", "images"],
             [
@@ -273,7 +212,7 @@ def ls_batches(original_set: str | None = typer.Argument(None)):
     """List image/annotation batches (a spec's source names them as name@version)."""
     rows = crud.list_batches(new_session(), original_set)
     console.print(
-        _table(
+        table(
             "Batches",
             ["original_set", "kind", "version", "in a spec", "items", "categories"],
             [
@@ -296,7 +235,7 @@ def ls_categories():
     """List each annotation batch's local category namespace."""
     rows = crud.list_categories(new_session())
     console.print(
-        _table(
+        table(
             "Local categories",
             ["scope", "name", "supercategory", "id"],
             [
@@ -317,7 +256,7 @@ def ls_annotators():
     """List annotators and how much each of them labelled."""
     rows = crud.list_annotators(new_session())
     console.print(
-        _table(
+        table(
             "Annotators",
             ["name", "cls", "det"],
             [[r["name"], r["cls"], r["det"]] for r in rows],
@@ -344,7 +283,7 @@ def ls_manual_sets():
                 ]
             )
     console.print(
-        _table(
+        table(
             "Manual sets",
             ["name", "version", "images", "cls", "det", "target categories", "created"],
             table_rows,
@@ -361,7 +300,7 @@ def ls_history(limit: int = 20):
     """
     rows = crud.build_history(new_session(), limit)
     console.print(
-        _table(
+        table(
             "Build history",
             ["manual-set", "version", "images", "spec", "built by", "created"],
             [
@@ -397,7 +336,7 @@ def lists_add(
     names. Content-addressed: storing the same list twice keeps one row.
     """
     if not file.exists():
-        _die(f"{file} not found")
+        die(f"{file} not found")
     names = file.read_text().splitlines()
     digest, created = crud.register_import_list(new_session(), names, note or file.name)
     count = len(crud.normalize_file_names(names))
@@ -418,7 +357,7 @@ def lists_ls(limit: int = 30):
     """List the stored lists."""
     rows = crud.list_import_lists(new_session(), limit)
     console.print(
-        _table(
+        table(
             "File-name lists",
             ["sha256", "names", "note", "created"],
             [
@@ -449,7 +388,7 @@ def lists_show(
             r for r in crud.list_import_lists(db, 500) if r["sha256"].startswith(sha256)
         ]
         if len(matches) != 1:
-            _die(
+            die(
                 f"no list whose sha256 starts with {sha256}"
                 if not matches
                 else f"{sha256} matches {len(matches)} lists; give a longer prefix"
@@ -477,17 +416,17 @@ def _spec_argument(db, token: str) -> BuildSpec:
             db, token, on_warning=lambda msg: console.print(f"[yellow]⚠[/] {msg}")
         )
     except SpecError as exc:
-        _die(str(exc))
+        die(str(exc))
         raise
 
 
 def _load_spec(path: Path) -> BuildSpec:
     if not path.exists():
-        _die(f"spec file {path} not found")
+        die(f"spec file {path} not found")
     try:
         return BuildSpec.from_yaml(path.read_text())
     except Exception as exc:
-        _die(f"invalid spec:\n{exc}")
+        die(f"invalid spec:\n{exc}")
         raise
 
 
@@ -500,7 +439,7 @@ def validate(spec_file: Path = typer.Argument(..., help="A spec YAML file")):
     )
     console.print(f"  sha256 = {spec.sha256()}")
     console.print(
-        _table(
+        table(
             "Steps",
             ["#", "step_id", "op", "inputs"],
             [
@@ -540,7 +479,7 @@ def build(
     """
     db = new_session()
     spec = _spec_argument(db, spec_file)
-    author = None if dry_run else _resolve_author(author_name, author_email)
+    author = None if dry_run else resolve_author(author_name, author_email)
     try:
         result = run_build(
             db,
@@ -552,11 +491,11 @@ def build(
             meta=None if dry_run else meta_prompts.on_commit(db),
         )
     except SpecError as exc:
-        _die(str(exc))
+        die(str(exc))
         raise
 
     console.print(
-        _table(
+        table(
             "Execution",
             ["#", "step_id", "op", "images", "cls", "det"],
             [
@@ -603,7 +542,7 @@ def show(
 ):
     """Show the composition of a manual-set version."""
     db = new_session()
-    version_id = _resolve(db, ref)
+    version_id = resolve_version_id(db, ref)
     summary = crud.version_summary(db, version_id)
 
     console.print(
@@ -618,14 +557,14 @@ def show(
         )
     )
     console.print(
-        _table(
+        table(
             "Composition",
             ["source", "images"],
             [[k, v] for k, v in summary["by_source"].items()],
         )
     )
     console.print(
-        _table(
+        table(
             "Target categories",
             ["target", "annotations", "from local categories"],
             [
@@ -655,10 +594,10 @@ def spec(
     channel, not a data channel.
     """
     db = new_session()
-    version_id = _resolve(db, ref)
+    version_id = resolve_version_id(db, ref)
     loaded = crud.load_spec(db, version_id)
     if loaded["yaml"] is None:
-        _die(f"{ref}: {crud._spec_unavailable(loaded)}")
+        die(f"{ref}: {crud._spec_unavailable(loaded)}")
     if loaded["status"] == "modified":
         console.print(f"[yellow]⚠[/] {crud._spec_unavailable(loaded)}")
 
@@ -670,6 +609,79 @@ def spec(
         return
     # word_wrap=True: long lines wrap instead of being cropped, so no text is lost
     console.print(Syntax(loaded["yaml"], "yaml", theme="ansi_dark", word_wrap=True))
+
+
+def _print_image_annotations(d: dict, version: str | None) -> None:
+    rows = [
+        [f"#{a['id']}", "cls", a["category"], a["source"], a["annotator"], a["score"]]
+        for a in d["cls_annotations"]
+    ] + [
+        [f"#{a['id']}", "det", a["category"], a["source"], a["annotator"], a["score"]]
+        for a in d["det_annotations"]
+    ]
+    console.print(
+        table(
+            "Annotations" + (f" (only {version})" if version else ""),
+            ["id", "kind", "category", "source", "annotator", "score"],
+            rows,
+        )
+        if rows
+        else table("Annotations", ["id"], [])
+    )
+
+
+def _print_image_lineage(d: dict) -> None:
+    if not d["lineage"]:
+        return
+    console.print(
+        table(
+            "Lineage",
+            ["direction", "image", "id"],
+            [
+                [
+                    "◀ from" if l["direction"] == "parent" else "▶ derived into",
+                    f"{l['original_set']}/{l['version']}/{l['file_name']}",
+                    f"#{l['id']}",
+                ]
+                for l in d["lineage"]
+            ],
+        )
+    )
+
+
+def _print_image_duplicates(d: dict) -> None:
+    if not d["duplicates"]:
+        return
+    console.print(
+        table(
+            "Other images with identical content (same blake3)",
+            ["image", "id"],
+            [
+                [
+                    f"{x['original_set']}/{x['batch_version']}/{x['file_name']}",
+                    f"#{x['id']}",
+                ]
+                for x in d["duplicates"]
+            ],
+        )
+    )
+
+
+def _print_image_usage(d: dict) -> None:
+    if not d["used_by"]:
+        return
+    console.print(
+        table(
+            "Used by these datasets",
+            ["manual-set", "version", "annotations selected"],
+            [[u["name"], u["version"], u["annotations"]] for u in d["used_by"]],
+        )
+    )
+    console.print(
+        f"  [dim]cxr why <manual-set@version> --image "
+        f"{d['original_set']}/{d['batch_version']}/{d['file_name']} "
+        "shows how it got in[/]"
+    )
 
 
 @app.command()
@@ -690,7 +702,7 @@ def image(
     db = new_session()
     image_id = crud.resolve_image(db, ref)
     if image_id is None:
-        _die(
+        die(
             f"image {ref} not found"
             + (
                 " (a bare file name may match several images; "
@@ -700,7 +712,7 @@ def image(
             )
         )
 
-    version_id = _resolve(db, version) if version else None
+    version_id = resolve_version_id(db, version) if version else None
     d = crud.image_detail(db, image_id, version_id)
 
     console.print(
@@ -713,68 +725,10 @@ def image(
             title=f"[cyan]image #{image_id}[/]",
         )
     )
-
-    rows = [
-        [f"#{a['id']}", "cls", a["category"], a["source"], a["annotator"], a["score"]]
-        for a in d["cls_annotations"]
-    ] + [
-        [f"#{a['id']}", "det", a["category"], a["source"], a["annotator"], a["score"]]
-        for a in d["det_annotations"]
-    ]
-    console.print(
-        _table(
-            "Annotations" + (f" (only {version})" if version else ""),
-            ["id", "kind", "category", "source", "annotator", "score"],
-            rows,
-        )
-        if rows
-        else _table("Annotations", ["id"], [])
-    )
-
-    if d["lineage"]:
-        console.print(
-            _table(
-                "Lineage",
-                ["direction", "image", "id"],
-                [
-                    [
-                        "◀ from" if l["direction"] == "parent" else "▶ derived into",
-                        f"{l['original_set']}/{l['version']}/{l['file_name']}",
-                        f"#{l['id']}",
-                    ]
-                    for l in d["lineage"]
-                ],
-            )
-        )
-
-    if d["duplicates"]:
-        console.print(
-            _table(
-                "Other images with identical content (same blake3)",
-                ["image", "id"],
-                [
-                    [
-                        f"{x['original_set']}/{x['batch_version']}/{x['file_name']}",
-                        f"#{x['id']}",
-                    ]
-                    for x in d["duplicates"]
-                ],
-            )
-        )
-
-    if d["used_by"]:
-        console.print(
-            _table(
-                "Used by these datasets",
-                ["manual-set", "version", "annotations selected"],
-                [[u["name"], u["version"], u["annotations"]] for u in d["used_by"]],
-            )
-        )
-        console.print(
-            f"  [dim]cxr why <manual-set@version> --image "
-            f"{d['original_set']}/{d['batch_version']}/{d['file_name']} "
-            "shows how it got in[/]"
-        )
+    _print_image_annotations(d, version)
+    _print_image_lineage(d)
+    _print_image_duplicates(d)
+    _print_image_usage(d)
 
 
 @app.command()
@@ -786,11 +740,11 @@ def why(
 ):
     """Answer the question that "At which step, or by which criteria was this image selected or excluded?"""
     db = new_session()
-    version_id = _resolve(db, ref)
+    version_id = resolve_version_id(db, ref)
 
     result = crud.explain(db, version_id, file_name=image)
     if not result["found"]:
-        _die(result["reason"])
+        die(result["reason"])
 
     status = (
         "[green]in the final set[/]"
@@ -834,11 +788,11 @@ def diff(
     db = new_session()
     ids = []
     for ref in (left, right):
-        ids.append(_resolve(db, ref))
+        ids.append(resolve_version_id(db, ref))
 
     result = crud.diff_versions(db, ids[0], ids[1])
     console.print(
-        _table(
+        table(
             "Images",
             ["", "count"],
             [
@@ -851,7 +805,7 @@ def diff(
         )
     )
     console.print(
-        _table(
+        table(
             "cls annotations",
             ["", "count"],
             [
@@ -866,7 +820,7 @@ def diff(
     )
     if result["category_mapping_changes"]:
         console.print(
-            _table(
+            table(
                 "Category mapping changes",
                 ["local category", left, right],
                 [
@@ -892,11 +846,11 @@ def check_leakage(
 ):
     """Check if there are any duplicate content or shared subjects between multiple versions."""
     if len(refs) < 2:
-        _die("give at least two versions to compare")
+        die("give at least two versions to compare")
     db = new_session()
     ids = []
     for ref in refs:
-        ids.append(_resolve(db, ref))
+        ids.append(resolve_version_id(db, ref))
 
     report = crud.duplicate_report(db, ids)
     content = report["identical_content"]["groups"]
@@ -936,10 +890,10 @@ def rm(
     manual_set, _, version = ref.partition("@")
     plan = crud.describe_deletion(db, manual_set, version or None)
     if not plan["found"]:
-        _die(f"{ref} not found ([cyan]cxr ls manual-sets[/] lists what exists)")
+        die(f"{ref} not found ([cyan]cxr ls manual-sets[/] lists what exists)")
 
     console.print(
-        _table(
+        table(
             f"About to delete [bold]{manual_set}[/]",
             [
                 "version",
@@ -985,7 +939,7 @@ def rm(
 
     if not yes:
         if not sys.stdin.isatty():
-            _die("Refusing to delete without a terminal to confirm. Add --yes if you mean it.")
+            die("Refusing to delete without a terminal to confirm. Add --yes if you mean it.")
         if not typer.confirm("Delete?"):
             console.print("  [dim]cancelled[/]")
             raise typer.Abort()
@@ -1029,9 +983,9 @@ def export(
     `-o ChestDatasetsRoot` puts it where the dataset format expects it.
     """
     if fmt not in EXPORT_FORMATS:
-        _die(f"unknown format {fmt!r} (use {', '.join(EXPORT_FORMATS)})")
+        die(f"unknown format {fmt!r} (use {', '.join(EXPORT_FORMATS)})")
     db = new_session()
-    version_id = _resolve(db, ref)
+    version_id = resolve_version_id(db, ref)
 
     if fmt == "parquet":
         written = export_mod.to_parquet(db, version_id, out)
@@ -1099,12 +1053,12 @@ def _write_meta(
     existing = store.get_meta(kind, name, version)  # type: ignore[arg-type]
     if view:
         if existing is None:
-            _die(f"{ref} has no __meta__.md yet (write one with `cxr meta {kind} {ref}`)")
+            die(f"{ref} has no __meta__.md yet (write one with `cxr meta {kind} {ref}`)")
         typer.echo(existing, nl=False)
         return
     if existing is not None and not yes:
-        if not meta_prompts.interactive():
-            _die(
+        if not interactive():
+            die(
                 f"{ref} already has a __meta__.md; add --yes to replace it "
                 "(--view shows it)"
             )
@@ -1142,10 +1096,10 @@ def meta_images(
     original-sets/<set>/images/<version>/__meta__.md.
     """
     db = new_session()
-    name, version = _parse_ref(ref)
+    name, version = parse_ref(ref)
     batch = crud.batch_id(db, "image", name, version)
     if batch is None:
-        _die(f"image batch {ref} not found ([cyan]cxr ls batches[/] lists them)")
+        die(f"image batch {ref} not found ([cyan]cxr ls batches[/] lists them)")
 
     def render() -> str:
         stats = crud.image_batch_stats(db, batch, sample=sample)
@@ -1177,10 +1131,10 @@ def meta_annotations(
     is asked. Stored at original-sets/<set>/annotations/<version>/__meta__.md.
     """
     db = new_session()
-    name, version = _parse_ref(ref)
+    name, version = parse_ref(ref)
     batch = crud.batch_id(db, "annotation", name, version)
     if batch is None:
-        _die(f"annotation batch {ref} not found ([cyan]cxr ls batches[/] lists them)")
+        die(f"annotation batch {ref} not found ([cyan]cxr ls batches[/] lists them)")
     _write_meta(
         "annotations",
         name,
@@ -1204,8 +1158,8 @@ def meta_manual_set(
     version's spec.yaml.
     """
     db = new_session()
-    version_id = _resolve(db, ref)
-    name, version = _parse_ref(ref)
+    version_id = resolve_version_id(db, ref)
+    name, version = parse_ref(ref)
     _write_meta(
         "manual-set",
         name,
