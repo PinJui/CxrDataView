@@ -9,6 +9,7 @@
 """
 
 import json
+import re
 import uuid
 
 import pytest
@@ -520,3 +521,109 @@ def test_meta_on_a_missing_batch_fails_cleanly():
     assert "not found" in fails("meta", "images", "no_such_set@V1")
     assert "not found" in fails("meta", "annotations", "no_such_set@V1")
     assert "not found" in fails("meta", "manual-set", "no_such_set@V1")
+
+
+# ---------------------------------------------------------------------------
+# The commands and error paths that pytest had never executed
+# ---------------------------------------------------------------------------
+
+
+def test_lists_add_ls_and_show(db, tmp_path):
+    """A long list goes to the database and a spec refers to it by hash."""
+    path = tmp_path / "picks.txt"
+    path.write_text("\n".join(f"BULK_{i}.png" for i in range(300)))
+
+    output = ok("lists", "add", str(path), "--note", "pytest")
+    digest = re.search(r"[0-9a-f]{64}", output).group(0)
+    try:
+        assert "300" in output and "file_names_ref" in output
+        # storing the identical list again is a no-op, not a second row
+        assert "already stored" in ok("lists", "add", str(path), "--note", "pytest")
+        assert digest[:16] in ok("lists", "ls")
+
+        shown = ok("lists", "show", digest[:12], "-n", "3")  # a prefix is enough
+        assert "BULK_0.png" in shown and "more" in shown
+        assert "no list whose sha256 starts with" in fails("lists", "show", "ffffffff")
+    finally:
+        db.execute(
+            text("DELETE FROM manual_set_import_lists WHERE sha256 = :s"), {"s": digest}
+        )
+        db.commit()
+
+
+def test_explore_starts_the_repl(monkeypatch):
+    from cxr_dataset_manager.cli import repl as repl_mod
+
+    started = []
+    monkeypatch.setattr(repl_mod, "run", started.append)
+    ok("explore", "probe_session")
+    assert started == ["probe_session"]
+
+
+def test_the_entrypoint_collapses_an_error_into_one_line(monkeypatch, capsys):
+    """Users want to know what they got wrong, not a SQLAlchemy traceback."""
+    import cxr_dataset_manager.cli.main as main_mod
+    from cxr_dataset_manager.core.types import SpecError
+
+    def raiser(exc):
+        def go():
+            raise exc
+
+        return go
+
+    monkeypatch.setattr(main_mod, "app", raiser(SpecError("this spec is wrong")))
+    with pytest.raises(SystemExit) as exited:
+        main_mod.main()
+    assert exited.value.code == 1
+    out = capsys.readouterr().out
+    assert "this spec is wrong" in out and "Traceback" not in out
+
+    monkeypatch.setattr(main_mod, "app", raiser(RuntimeError("boom")))
+    with pytest.raises(SystemExit):
+        main_mod.main()
+    out = capsys.readouterr().out
+    assert "RuntimeError: boom" in out and "CXR_DEBUG=1" in out
+
+
+def test_meta_view_without_a_file_says_how_to_write_one(built):
+    from cxr_dataset_manager.storage import get_store
+
+    store = get_store()
+    saved = store.get_meta("manual-set", built["name"], "V1")
+    store.delete_meta("manual-set", built["name"], "V1")
+    try:
+        assert "has no __meta__.md yet" in fails(
+            "meta", "manual-set", f"{built['name']}@V1", "--view"
+        )
+    finally:
+        store.put_meta("manual-set", built["name"], "V1", saved)
+
+
+def test_parquet_refuses_a_segmentation_it_cannot_hold():
+    """The format's column is list<list<double>>; RLE has nowhere to go."""
+    from cxr_dataset_manager.core import export as export_mod
+    from cxr_dataset_manager.core.types import SpecError
+
+    assert export_mod._polygons(None, 1) is None
+    assert export_mod._polygons([[1, 2, 3, 4]], 1) == [[1.0, 2.0, 3.0, 4.0]]
+    assert export_mod._polygons([1, 2, 3, 4], 1) == [[1.0, 2.0, 3.0, 4.0]]
+    with pytest.raises(SpecError, match="RLE"):
+        export_mod._polygons({"counts": "abc", "size": [10, 10]}, 42)
+
+
+def test_parquet_refuses_an_annotation_with_no_class(built, db, monkeypatch, tmp_path):
+    """build() forbids it, but a hand-imported version could still carry one."""
+    from cxr_dataset_manager.core import export as export_mod
+    from cxr_dataset_manager.core.types import SpecError
+
+    version_id = crud.resolve_version(db, built["name"], "V1")
+    real_rows = export_mod._rows
+
+    def with_one_unmapped(session, vid):
+        images, cls, det = real_rows(session, vid)
+        cls[0] = {**cls[0], "target_category": None}
+        return images, cls, det
+
+    monkeypatch.setattr(export_mod, "_rows", with_one_unmapped)
+    with pytest.raises(SpecError, match="needs a class"):
+        export_mod.to_parquet(db, version_id, tmp_path)

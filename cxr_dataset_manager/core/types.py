@@ -127,12 +127,6 @@ class CandidateSet:
         self.det = {a for a in self.det if catalog.det(a).image_id in self.images}
         return self
 
-    def orphan_annotations(self, catalog: Catalog) -> tuple[set[int], set[int]]:
-        return (
-            {a for a in self.cls if catalog.cls(a).image_id not in self.images},
-            {a for a in self.det if catalog.det(a).image_id not in self.images},
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class Decision:
@@ -484,29 +478,11 @@ class Catalog:
             self.ensure_categories([category_id])
         return self._categories[category_id]
 
-    def annotations_of_image(
-        self, image_id: int, kind: str = "cls"
-    ) -> list[AnnotationMeta]:
-        pool = self._cls if kind == "cls" else self._det
-        return [a for a in pool.values() if a.image_id == image_id]
-
     def images_of_batch(self, batch_id: int) -> list[int]:
         return self._images_by_batch.get(batch_id, [])
 
     def categories_of_batch(self, batch_id: int) -> list[int]:
         return self._categories_by_batch.get(batch_id, [])
-
-    def find_image_by_file_name(
-        self, original_set: str, batch_version: str, file_name: str
-    ) -> ImageMeta | None:
-        for meta in self._images.values():
-            if (
-                meta.original_set_name == original_set
-                and meta.batch_version == batch_version
-                and meta.file_name == file_name
-            ):
-                return meta
-        return None
 
     def subject_key(self, image_id: int) -> tuple[str, bool]:
         """回傳 (切割用的 key, 是否為 fallback)。

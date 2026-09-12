@@ -157,13 +157,6 @@ class ObjectStore:
             keys.update(obj["Key"] for obj in page.get("Contents", []))
         return keys
 
-    def presigned_url(self, key: str, bucket: str = ORIGINAL_SET_BUCKET) -> str:
-        return self.client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": bucket, "Key": key},
-            ExpiresIn=settings.presigned_url_expire_seconds,
-        )
-
     def alive(self) -> bool:
         try:
             self.client.list_buckets()

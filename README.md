@@ -88,7 +88,7 @@ manual-sets bucket. Prefer `--dry-run` first; `CXR_DEBUG=1` gives tracebacks.
 
 ## Verifying
 ```bash
-python -m pytest tests/ -q                        # 198 tests
+python -m pytest tests/ -q                        # 221 tests
 docker exec -i local-postgres psql -U postgres -d cxr < scripts/verify.sql
 ./scripts/acceptance.sh                           # rebuilds and checks everything
 ```

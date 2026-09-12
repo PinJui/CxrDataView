@@ -816,3 +816,35 @@ def test_a_duplicate_det_box_is_caught_even_when_its_score_is_null(db):
             params,
         )
     db.rollback()
+
+
+def test_a_failing_meta_callback_leaves_no_version(db, spec):
+    """__meta__.md 是在選取寫入之後、commit 之前產生的。
+
+    那個 callback 會去問人（`cxr meta` 的提問），所以它失敗、或使用者按
+    Ctrl-C，整份 build 都必須回到什麼都沒發生的狀態。
+    """
+    name = f"pytest_{uuid.uuid4().hex[:8]}"
+    seen = []
+
+    def explode(version_id):
+        seen.append(version_id)
+        raise RuntimeError("nobody answered")
+
+    try:
+        with pytest.raises(RuntimeError, match="nobody answered"):
+            build(db, spec, name, "V1", author=TEST_AUTHOR, meta=explode)
+
+        assert seen, "callback 應該拿得到剛寫好的 version id"
+        assert crud.resolve_version(db, name, "V1") is None
+        assert (
+            db.execute(
+                text("SELECT count(*) FROM manual_sets WHERE name = :n"), {"n": name}
+            ).scalar_one()
+            == 0
+        )
+        # spec 物件是刻意先寫的：失敗只留下一個沒人指向的檔案（design_doc §6）
+        assert get_store().get_spec(name, "V1") is not None
+    finally:
+        get_store().delete_spec(name, "V1")
+        _cleanup(db, name)

@@ -209,7 +209,7 @@ The builder is recorded as plain name/email columns, not as an annotator.
 `scripts/acceptance.sh` rebuilds everything and runs the end-to-end checks.
 
 ## 8. Testing
-198 tests against real PostgreSQL and MinIO — SQLite has none of the deferred
+221 tests against real PostgreSQL and MinIO — SQLite has none of the deferred
 triggers, composite FKs, `ARRAY` or `JSONB` the guarantees rest on.
 
 | File | Covers |
@@ -217,14 +217,16 @@ triggers, composite FKs, `ARRAY` or `JSONB` the guarantees rest on.
 | `test_spec.py` · `test_predicate.py` | Syntax; malformed specs and code injection refused |
 | `test_ops.py` | The rules — the behavioural contract |
 | `test_engine.py` | Reproducibility, transactions, provenance, spec integrity |
-| `test_session.py` · `test_repl.py` | Exploration, and explore → save → build round trips |
+| `test_session.py` · `test_repl.py` | The session API, and every `cxr explore` command run once |
 | `test_cli.py` | Every command executes and fails cleanly |
 | `test_import_lists.py` · `test_meta.py` | Long lists; `__meta__.md` templates |
 | `test_import_image_batch.py` | The image importer against the real bucket |
 
 Interface code has failed where unit tests could not see (`fixed_issues.md`), so
-output paths are tested as output paths. Interactive prompts need a real pty;
-under pytest they take their defaults.
+output paths are tested as output paths and every command of both interfaces is
+executed at least once. Interactive prompts need a real pty; under pytest they
+take their defaults. `db init` / `db seed` / `db reset` are left to
+`acceptance.sh`: running them under pytest would wipe the developer's database.
 
 ## 9. Known limitations
 - Exploration state lives in the process; `save` / `load` carry it across.

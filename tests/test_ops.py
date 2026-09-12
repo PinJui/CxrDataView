@@ -8,8 +8,10 @@ from cxr_dataset_manager.core.schema import (
     ConflictResolveStep,
     ConflictRule,
     DedupStep,
+    ExceptStep,
     FilterStep,
     ImportListStep,
+    IntersectStep,
     SourceStep,
     UnionStep,
 )
@@ -784,3 +786,73 @@ def test_balance_by_target_needs_a_mapping_first(catalog):
                 by="target",
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# 集合運算：union 一直有測，intersect / except 沒有
+# ---------------------------------------------------------------------------
+
+
+def _half(catalog, cand, seed):
+    return ops.op_filter(
+        catalog,
+        [cand],
+        FilterStep(
+            id="f",
+            input="s",
+            criterion="sample",
+            key_field="image_id",
+            mod=2,
+            keep_remainder=[0],
+            seed=seed,
+        ),
+    ).candidates
+
+
+def test_intersect_keeps_only_what_every_input_has(catalog):
+    whole = src(catalog, "aws_images", annotation_batch="V1")
+    half = _half(catalog, whole, "intersect")
+    assert half.images < whole.images, "測試前提：要真的切掉一部分"
+
+    both = ops.op_intersect(
+        catalog, [whole, half], IntersectStep(id="i", inputs=["s", "f"])
+    ).candidates
+    assert both.images == half.images
+    assert both.cls == whole.cls & half.cls
+    for ann_id in both.cls:
+        assert catalog.cls(ann_id).image_id in both.images
+
+
+def test_intersecting_two_different_sources_keeps_nothing(catalog):
+    """影像是每個 batch 各自的列，兩個 original-set 不會共用 image_id——
+    內容重複是 dedup 的事，不是 intersect 的事。"""
+    aws = src(catalog, "aws_images", annotation_batch="V1")
+    tb = src(catalog, "TB-portal", annotation_batch="V1")
+    both = ops.op_intersect(
+        catalog, [aws, tb], IntersectStep(id="i", inputs=["a", "t"])
+    ).candidates
+    assert both.images == aws.images & tb.images == set()
+    assert not both.cls and not both.det
+
+
+def test_except_subtracts_and_takes_the_annotations_with_it(catalog):
+    whole = src(catalog, "aws_images", annotation_batch="V1")
+    half = _half(catalog, whole, "except")
+
+    rest = ops.op_except(
+        catalog, [whole, half], ExceptStep(id="e", inputs=["s", "f"])
+    ).candidates
+    assert rest.images == whole.images - half.images
+    assert len(rest.images) + len(half.images) == len(whole.images)
+    assert not (rest.cls & half.cls), "被扣掉的影像的標註也要跟著走"
+    # CandidateSet 的不變條件：每筆標註的影像都還在集合裡
+    for ann_id in rest.cls | rest.det:
+        assert catalog.annotation("cls" if ann_id in rest.cls else "det", ann_id).image_id in rest.images
+
+
+def test_except_reports_what_it_removed(catalog):
+    whole = src(catalog, "aws_images", annotation_batch="V1")
+    half = _half(catalog, whole, "except-stats")
+    result = ops.op_except(catalog, [whole, half], ExceptStep(id="e", inputs=["s", "f"]))
+    assert result.stats["images_removed"] == len(half.images)
+    assert {d.entity_id for d in result.decisions} == half.images

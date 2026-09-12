@@ -48,14 +48,17 @@ def batch(tmp_path, db):
     db.commit()
 
 
-def _import(monkeypatch, batch, *flags):
+def _import(monkeypatch, batch, *flags, prepare=None):
     monkeypatch.setattr(
         sys,
         "argv",
         ["import_image_batch.py", "-d", str(batch["dir"]), "-s", batch["name"],
          "-v", "V1", "--workers", "2", *flags],
     )
-    _script().main()
+    module = _script()
+    if prepare is not None:
+        prepare(module)
+    module.main()
 
 
 def _registered(db, name) -> set[str]:
@@ -94,3 +97,38 @@ def test_overwrite_replaces_the_object_and_registers_it(monkeypatch, batch, db):
     assert _registered(db, batch["name"]) == {"img_0.png", "img_1.png"}
     # the backup taken before overwriting is gone once the import succeeded
     assert not get_store().list_keys(f"_rollback_backups/{batch['name']}/")
+
+
+def test_a_failure_after_uploading_restores_what_it_overwrote(monkeypatch, batch, db):
+    """覆寫途中失敗時，舊物件要被「還原」，不是連同新內容一起刪掉。
+
+    這條路徑才是 --on-image-exists overwrite 敢存在的理由：先備份、失敗就
+    復原。沒有它，一次失敗的匯入會把 bucket 上原本好好的舊影像清掉。
+    """
+
+    def break_the_commit(module):
+        real_new_session = module.new_session
+
+        class FailsAtCommit:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def commit(self):
+                raise RuntimeError("database went away")
+
+        module.new_session = lambda: FailsAtCommit(real_new_session())
+
+    _import(
+        monkeypatch, batch, "--on-image-exists", "overwrite", prepare=break_the_commit
+    )
+
+    store = get_store()
+    assert store.get(batch["orphan"]) == OLDER, "被覆寫的舊物件要回到原本的內容"
+    assert not store.list_keys(f"_rollback_backups/{batch['name']}/"), "備份要清乾淨"
+    # 這次新上傳的那張本來就不存在，該直接刪掉
+    fresh = object_key_for_image(batch["name"], "V1", "img_1.png")
+    assert fresh not in store.list_keys(f"{batch['name']}/")
+    assert _registered(db, batch["name"]) == set()
